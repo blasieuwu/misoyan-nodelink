@@ -935,15 +935,24 @@ export class Player {
       return { exception: { message: 'Stream processor not initialized' } }
     }
 
-    const additionalData: Record<string, unknown> & { startTime?: number } = {
+    const additionalData: Record<string, unknown> & {
+      startTime?: number
+      position?: number
+      positionCallback?: (positionMs: number) => void
+    } = {
       ...urlData.additionalData
     }
-    if (startTime !== undefined) additionalData.startTime = startTime
-
-    urlData.additionalData = {
-      ...urlData.additionalData,
-      positionCallback: () => this._realPosition()
+    if (startTime !== undefined) {
+      additionalData.startTime = startTime
+      // Keep both keys for source compatibility while seek handling is unified.
+      additionalData.position = startTime
     }
+    additionalData.positionCallback = (positionMs: number) => {
+      if (!Number.isFinite(positionMs) || positionMs < 0) return
+      this.position = positionMs
+    }
+
+    urlData.additionalData = additionalData
 
     const track = urlData?.newTrack
       ? (urlData?.newTrack?.info as TrackInfoExtended)
@@ -1458,6 +1467,9 @@ export class Player {
     this._isSeeking = true
     try {
       const sourceName = this.track.info.sourceName
+      const resolvedSourceName =
+        (this.streamInfo?.newTrack as { info?: { sourceName?: string } } | null)
+          ?.info?.sourceName ?? sourceName
       const unsupportedSources = ['local', 'deezer']
 
       let seekPromise: Promise<boolean>
@@ -1503,7 +1515,8 @@ export class Player {
       const hasSourceLoader = source && typeof source.loadStream === 'function'
       const canNativeSeek =
         !!hasSourceLoader &&
-        (this.streamInfo?.protocol === 'sabr' || sourceName === 'deezer')
+        (this.streamInfo?.protocol === 'sabr' ||
+          (sourceName === 'deezer' && resolvedSourceName === 'deezer'))
 
       if (forceLegacy) {
         seekPromise = this._legacySeek(
@@ -1516,7 +1529,7 @@ export class Player {
           endTime !== undefined ? endTime : this.track.endTime
         )
       } else if (
-        !unsupportedSources.includes(sourceName) &&
+        !unsupportedSources.includes(resolvedSourceName) &&
         this.streamInfo?.url &&
         this.streamInfo.protocol !== 'hls' &&
         this.streamInfo.protocol !== 'dash'

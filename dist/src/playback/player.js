@@ -84,6 +84,7 @@ export class Player {
     _isRestoring = false;
     _isSeeking = false;
     _isStopping = false;
+    stuckRecoveryCount = 0;
     constructor(options) {
         if (!options.nodelink ||
             !options.session?.socket ||
@@ -637,12 +638,17 @@ export class Player {
         const additionalData = {
             ...urlData.additionalData
         };
-        if (startTime !== undefined)
+        if (startTime !== undefined) {
             additionalData.startTime = startTime;
-        urlData.additionalData = {
-            ...urlData.additionalData,
-            positionCallback: () => this._realPosition()
+            // Keep both keys for source compatibility while seek handling is unified.
+            additionalData.position = startTime;
+        }
+        additionalData.positionCallback = (positionMs) => {
+            if (!Number.isFinite(positionMs) || positionMs < 0)
+                return;
+            this.position = positionMs;
         };
+        urlData.additionalData = additionalData;
         const track = urlData?.newTrack
             ? urlData?.newTrack?.info
             : info;
@@ -780,6 +786,7 @@ export class Player {
                         statistics: this.connection?.statistics
                     });
                     this._isRecovering = true;
+                    this.stuckRecoveryCount++;
                     this.seek(this._lastPosition, this.track.endTime, true)
                         .then((success) => {
                         if (success) {
@@ -985,6 +992,8 @@ export class Player {
         this._isSeeking = true;
         try {
             const sourceName = this.track.info.sourceName;
+            const resolvedSourceName = this.streamInfo?.newTrack
+                ?.info?.sourceName ?? sourceName;
             const unsupportedSources = ['local', 'deezer'];
             let seekPromise;
             if (!this.streamInfo?.url) {
@@ -1012,14 +1021,15 @@ export class Player {
             const source = this.nodelink.sources.getSource(sourceName);
             const hasSourceLoader = source && typeof source.loadStream === 'function';
             const canNativeSeek = !!hasSourceLoader &&
-                (this.streamInfo?.protocol === 'sabr' || sourceName === 'deezer');
+                (this.streamInfo?.protocol === 'sabr' ||
+                    (sourceName === 'deezer' && resolvedSourceName === 'deezer'));
             if (forceLegacy) {
                 seekPromise = this._legacySeek(seekPosition, endTime !== undefined ? endTime : this.track.endTime);
             }
             else if (canNativeSeek) {
                 seekPromise = this._seekUsingSource(seekPosition, endTime !== undefined ? endTime : this.track.endTime);
             }
-            else if (!unsupportedSources.includes(sourceName) &&
+            else if (!unsupportedSources.includes(resolvedSourceName) &&
                 this.streamInfo?.url &&
                 this.streamInfo.protocol !== 'hls' &&
                 this.streamInfo.protocol !== 'dash') {

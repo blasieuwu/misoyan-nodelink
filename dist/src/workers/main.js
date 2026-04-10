@@ -1244,6 +1244,18 @@ function startTimers(hibernating = false) {
             const nodelinkLoad = elapsedMs > 0 ? (cpuUsage.user + cpuUsage.system) / 1000 / elapsedMs : 0;
             const mem = process.memoryUsage();
             const workerIdEnv = NODE_UNIQUE_ID;
+            const eluP50 = hndl.percentile(50) / 1e6;
+            const eluP95 = hndl.percentile(95) / 1e6;
+            const eluP99 = hndl.percentile(99) / 1e6;
+            let totalStuckRecoveries = 0;
+            for (const player of players.values()) {
+                const count = player
+                    .stuckRecoveryCount;
+                if (typeof count === 'number') {
+                    totalStuckRecoveries += count;
+                    player.stuckRecoveryCount = 0;
+                }
+            }
             const stats = {
                 workerId: parseInt(workerIdEnv ?? '0', 10) + 1,
                 isHibernating,
@@ -1251,12 +1263,15 @@ function startTimers(hibernating = false) {
                 playingPlayers: localPlayingPlayers,
                 commandQueueLength: Array.from(guildQueues.values()).reduce((acc, curr) => acc + getHeadQueueLength(curr.queue), 0),
                 cpu: { nodelinkLoad },
-                eventLoopLag: hndl.mean / 1e6,
+                eventLoopLag: eluP50,
+                eventLoopLagP95: eluP95,
+                eventLoopLagP99: eluP99,
                 memory: {
                     used: mem.heapUsed,
                     allocated: mem.heapTotal
                 },
-                frameStats: localFrameStats
+                frameStats: localFrameStats,
+                stuckRecoveries: totalStuckRecoveries
             };
             if (eventSocket && !eventSocket.destroyed) {
                 sendEventFrame(4, stats);
@@ -1337,7 +1352,8 @@ async function startLoadStream(streamId, payload) {
     }
     const additionalData = {
         ...(urlResult.additionalData || {}),
-        startTime: payload?.position || 0
+        startTime: payload?.position || 0,
+        position: payload?.position || 0
     };
     const fetched = (await nodelink.sources.getTrackStream(urlResult.newTrack?.info || trackInfo, urlResult.url, urlResult.protocol, additionalData));
     if (fetched.exception) {

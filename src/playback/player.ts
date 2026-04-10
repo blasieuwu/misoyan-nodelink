@@ -145,6 +145,7 @@ export class Player {
   private _isRestoring = false
   private _isSeeking = false
   private _isStopping = false
+  public stuckRecoveryCount = 0
 
   constructor(options: PlayerOptions) {
     if (
@@ -1162,6 +1163,7 @@ export class Player {
             }
           )
           this._isRecovering = true
+          this.stuckRecoveryCount++
 
           this.seek(this._lastPosition, this.track.endTime, true)
             .then((success) => {

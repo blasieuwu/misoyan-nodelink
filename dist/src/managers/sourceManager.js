@@ -350,7 +350,18 @@ export default class SourcesManager {
         if (!instance?.loadStream) {
             throw new Error(`Source ${track.sourceName} not found or does not support loadStream`);
         }
-        return (await instance.loadStream(track, url, protocol, additionalData));
+        const normalizedAdditionalData = {
+            ...(additionalData ?? {})
+        };
+        if (typeof normalizedAdditionalData.startTime === 'number' &&
+            typeof normalizedAdditionalData.position !== 'number') {
+            normalizedAdditionalData.position = normalizedAdditionalData.startTime;
+        }
+        if (typeof normalizedAdditionalData.position === 'number' &&
+            typeof normalizedAdditionalData.startTime !== 'number') {
+            normalizedAdditionalData.startTime = normalizedAdditionalData.position;
+        }
+        return (await instance.loadStream(track, url, protocol, normalizedAdditionalData));
     }
     /**
      * Retrieves chapter metadata for a track.

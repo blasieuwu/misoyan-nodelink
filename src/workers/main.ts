@@ -1689,6 +1689,20 @@ function startTimers(hibernating = false): void {
 
       const mem = process.memoryUsage()
       const workerIdEnv = NODE_UNIQUE_ID
+      const eluP50 = hndl.percentile(50) / 1e6
+      const eluP95 = hndl.percentile(95) / 1e6
+      const eluP99 = hndl.percentile(99) / 1e6
+
+      let totalStuckRecoveries = 0
+      for (const player of players.values()) {
+        const count = (player as { stuckRecoveryCount?: number })
+          .stuckRecoveryCount
+        if (typeof count === 'number') {
+          totalStuckRecoveries += count
+          player.stuckRecoveryCount = 0
+        }
+      }
+
       const stats = {
         workerId: parseInt(workerIdEnv ?? '0', 10) + 1,
         isHibernating,
@@ -1699,12 +1713,15 @@ function startTimers(hibernating = false): void {
           0
         ),
         cpu: { nodelinkLoad },
-        eventLoopLag: hndl.mean / 1e6,
+        eventLoopLag: eluP50,
+        eventLoopLagP95: eluP95,
+        eventLoopLagP99: eluP99,
         memory: {
           used: mem.heapUsed,
           allocated: mem.heapTotal
         },
-        frameStats: localFrameStats
+        frameStats: localFrameStats,
+        stuckRecoveries: totalStuckRecoveries
       }
 
       if (eventSocket && !eventSocket.destroyed) {

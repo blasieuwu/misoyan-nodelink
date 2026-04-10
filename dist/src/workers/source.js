@@ -978,7 +978,8 @@ else {
             else {
                 const additionalData = {
                     ...(urlResult.additionalData || {}),
-                    startTime: payload?.position || 0
+                    startTime: payload?.position || 0,
+                    position: payload?.position || 0
                 };
                 fetched =
                     (await nodelink.sources?.getTrackStream(urlResult.newTrack?.info || trackInfo, urlResult.url, urlResult.protocol, additionalData)) || null;

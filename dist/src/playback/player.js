@@ -84,6 +84,7 @@ export class Player {
     _isRestoring = false;
     _isSeeking = false;
     _isStopping = false;
+    _pausedAtPosition = undefined;
     stuckRecoveryCount = 0;
     constructor(options) {
         if (!options.nodelink ||
@@ -355,8 +356,9 @@ export class Player {
             this.isPaused = false;
             if (wasResuming && state.reason !== 'seamless_bridge') {
                 this._fading('trackEndSchedule', {
-                    startPosition: this._realPosition()
+                    startPosition: this._pausedAtPosition ?? this._realPosition()
                 });
+                this._pausedAtPosition = undefined;
             }
             else if (!this._isRestoring) {
                 this._lyricsBasePackets =
@@ -445,6 +447,7 @@ export class Player {
         this.holoTrack = null;
         this.isPaused = false;
         this.position = 0;
+        this._pausedAtPosition = undefined;
         this._lastStreamDataTime = 0;
         this.currentLyrics = null;
         this.lyricsLineIndex = -1;
@@ -1374,6 +1377,11 @@ export class Player {
             return false;
         logger('debug', 'Player', `Setting pause to ${shouldPause} for guild ${this.guildId}`);
         if (shouldPause) {
+            this._pausedAtPosition = this._realPosition();
+            if (this._fadeTimers?.trackEnd) {
+                clearTimeout(this._fadeTimers.trackEnd);
+                this._fadeTimers.trackEnd = null;
+            }
             if (this._fading('pause')) {
                 this.isPaused = true;
                 this.emitEvent(GatewayEvents.PAUSE, { paused: true });
@@ -1983,13 +1991,91 @@ export class Player {
             clearTimeout(timers.trackEnd);
             timers.trackEnd = null;
         }
+        if (action === 'trackEndSchedule') {
+            if (!this.track?.info)
+                return false;
+            const total = this.track.endTime && this.track.endTime > 0
+                ? this.track.endTime
+                : this.track.info.length || 0;
+            if (!Number.isFinite(total) || total <= 0)
+                return false;
+            const startPosition = payload.startPosition || 0;
+            const remaining = Math.max(0, total - startPosition);
+            const teSection = this.fading?.trackEnd;
+            const hasFade = teSection &&
+                Number.isFinite(teSection.duration) &&
+                teSection.duration > 0;
+            const fadeDuration = hasFade ? Math.min(teSection.duration, remaining) : 0;
+            const fadeType = hasFade ? teSection.type || 'volume' : 'volume';
+            const delay = Math.max(0, remaining - fadeDuration);
+            const scratchStyle = (hasFade ? teSection.curve : undefined);
+            if (fadeType === 'tape' || fadeType === 'scratch') {
+                this._snapshotPosition();
+            }
+            timers.trackEnd = setTimeout(() => {
+                const stream = this.connection?.audioStream;
+                if (stream) {
+                    if (hasFade && teSection) {
+                        if (fadeType === 'volume' || fadeType === 'both') {
+                            stream.fadeTo?.(0, fadeDuration, teSection.curve);
+                        }
+                        if (fadeType === 'tape' || fadeType === 'both') {
+                            stream.tapeTo?.(fadeDuration, 'stop', teSection.curve);
+                        }
+                        const effectiveScratchStyle = [
+                            'wash',
+                            'backspin',
+                            'baby',
+                            'stop'
+                        ].includes(scratchStyle ?? '')
+                            ? scratchStyle
+                            : 'wash';
+                        if (fadeType === 'scratch') {
+                            stream.scratchTo?.(fadeDuration, effectiveScratchStyle);
+                        }
+                    }
+                    if (fadeType !== 'volume' && hasFade) {
+                        const safetyTimeout = fadeDuration * 2 + 1500;
+                        const trackId = this.track?.info.identifier;
+                        setTimeout(() => {
+                            if (this.track?.info.identifier === trackId &&
+                                !this.isUpdatingTrack &&
+                                !this._isStopping) {
+                                logger('debug', 'Player', `Safety stop triggered for guild ${this.guildId} after long fade-out ramp.`);
+                                this.connection?.stop(EndReasons.FINISHED);
+                            }
+                        }, safetyTimeout).unref?.();
+                    }
+                    else if (fadeDuration === 0) {
+                        if (this.track && !this.isUpdatingTrack && !this._isStopping) {
+                            logger('debug', 'Player', `Scheduled track end for guild ${this.guildId} at ${this.track.info.length}ms`);
+                            this.connection?.stop(EndReasons.FINISHED);
+                        }
+                    }
+                    else {
+                        const trackId = this.track?.info.identifier;
+                        setTimeout(() => {
+                            if (this.track?.info.identifier === trackId &&
+                                !this.isUpdatingTrack &&
+                                !this._isStopping) {
+                                logger('debug', 'Player', `Track end after volume fade for guild ${this.guildId}`);
+                                this.connection?.stop(EndReasons.FINISHED);
+                            }
+                        }, fadeDuration + 100).unref?.();
+                    }
+                }
+                if (timers.trackEnd) {
+                    clearTimeout(timers.trackEnd);
+                    timers.trackEnd = null;
+                }
+            }, delay);
+            return true;
+        }
         if (!this.fading || this.fading.enabled !== true)
             return false;
         let section = null;
         if (action === 'trackStart' || action === 'trackStartArm')
             section = this.fading.trackStart;
-        else if (action === 'trackEndSchedule')
-            section = this.fading.trackEnd;
         else if (action === 'trackStop')
             section = this.fading.trackStop;
         else if (action === 'seek' || action === 'seekPrepare')
@@ -2210,53 +2296,6 @@ export class Player {
                 }
             }, 10);
             timers.stop = { interval: checkInterval };
-            return true;
-        }
-        if (action === 'trackEndSchedule') {
-            if (!this.track?.info)
-                return false;
-            const total = this.track.endTime && this.track.endTime > 0
-                ? this.track.endTime
-                : this.track.info.length || 0;
-            if (!Number.isFinite(total) || total <= 0)
-                return false;
-            const startPosition = payload.startPosition || 0;
-            const remaining = Math.max(0, total - startPosition);
-            const fadeDuration = Math.min(section.duration, remaining);
-            const delay = Math.max(0, remaining - fadeDuration);
-            timers.trackEnd = setTimeout(() => {
-                const stream = this.connection?.audioStream;
-                if (stream) {
-                    if (fadeType === 'volume' || fadeType === 'both') {
-                        stream.fadeTo?.(0, fadeDuration, section.curve);
-                    }
-                    if (fadeType === 'tape' || fadeType === 'both') {
-                        stream.tapeTo?.(fadeDuration, 'stop', section.curve);
-                    }
-                    if (fadeType === 'scratch') {
-                        const style = ['wash', 'backspin', 'baby', 'stop'].includes(scratchStyle)
-                            ? scratchStyle
-                            : 'wash';
-                        stream.scratchTo?.(fadeDuration, style);
-                    }
-                    if (fadeType !== 'volume') {
-                        const safetyTimeout = fadeDuration * 2 + 1500;
-                        const trackId = this.track?.info.identifier;
-                        setTimeout(() => {
-                            if (this.track?.info.identifier === trackId &&
-                                !this.isUpdatingTrack &&
-                                !this._isStopping) {
-                                logger('debug', 'Player', `Safety stop triggered for guild ${this.guildId} after long fade-out ramp.`);
-                                this.connection?.stop(EndReasons.FINISHED);
-                            }
-                        }, safetyTimeout).unref?.();
-                    }
-                }
-                if (timers.trackEnd) {
-                    clearTimeout(timers.trackEnd);
-                    timers.trackEnd = null;
-                }
-            }, delay);
             return true;
         }
         return false;

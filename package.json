@@ -1,12 +1,12 @@
 {
   "name": "nodelink",
-  "version": "3.8.0-dev.20260405.1",
+  "version": "3.8.0-dev.20260411.1",
   "scripts": {
     "build": "tsc --incremental false",
     "start": "node --dns-result-order=ipv4first --import tsx src/index.ts",
     "start:experimental": "node --experimental-transform-types --dns-result-order=ipv4first src/index.ts",
     "start:dist": "node --dns-result-order=ipv4first dist/src/index.js",
-    "start:bun": "bun run --dns-result-order=ipv4first src/index.js",
+    "start:bun": "bun run --dns-result-order=ipv4first src/index.ts",
     "type-check": "tsc --noEmit",
     "prepare": "husky"
   },

@@ -628,7 +628,7 @@ export default class AmazonMusicSource {
                 : body;
             if (statusCode === 200 && parsed?.entitiesByUniqueId) {
                 let entity = parsed.entitiesByUniqueId[parsed.entityUniqueId];
-                if (targetId && (!entity || !entity.id.includes(targetId))) {
+                if (targetId && !entity?.id.includes(targetId)) {
                     entity = Object.values(parsed.entitiesByUniqueId).find((e) => {
                         const typedE = e;
                         return typeof typedE.id === 'string' && typedE.id.includes(targetId);

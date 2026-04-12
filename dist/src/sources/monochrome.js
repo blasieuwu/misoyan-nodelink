@@ -86,7 +86,7 @@ class MonochromeSource {
         const checkInstance = async (instance) => {
             const start = Date.now();
             try {
-                const { statusCode } = await makeRequest(instance.url + '/', {
+                const { statusCode } = await makeRequest(`${instance.url}/`, {
                     method: 'GET',
                     timeout: 3000
                 });
@@ -109,7 +109,7 @@ class MonochromeSource {
                     logger('debug', 'Monochrome', `Instance ${instance.url} - Error: Status ${statusCode}, Score: 0`);
                 }
             }
-            catch (e) {
+            catch (_e) {
                 instance.score = 0;
                 instance.lastFailure = Date.now();
                 logger('debug', 'Monochrome', `Instance ${instance.url} - Connection Failed, Score: 0`);
@@ -118,11 +118,11 @@ class MonochromeSource {
         await Promise.allSettled(this.apiInstances.map(checkInstance));
         // Sync streaming scores if they use the same URLs
         for (const s of this.streamingInstances) {
-            const api = this.apiInstances.find(a => a.url === s.url);
+            const api = this.apiInstances.find((a) => a.url === s.url);
             if (api)
                 s.score = api.score;
         }
-        const reachable = this.apiInstances.filter(i => i.score > 0).length;
+        const reachable = this.apiInstances.filter((i) => i.score > 0).length;
         logger('info', 'Monochrome', `Source is ready with ${apiCount} API (${reachable} reachable) and ${streamCount} streaming instances.`);
         return true;
     }

@@ -231,7 +231,8 @@ function getPlayerPatchPayload(body) {
                 ? null
                 : undefined,
         position,
-        startTime: typeof payload.startTime === 'number' && Number.isFinite(payload.startTime)
+        startTime: typeof payload.startTime === 'number' &&
+            Number.isFinite(payload.startTime)
             ? payload.startTime
             : undefined,
         endTime: typeof endTime === 'number'

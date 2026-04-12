@@ -143,7 +143,7 @@ export class Encoder extends Transform {
     _encoding: string,
     cb: (err?: Error) => void
   ): void {
-    if (!chunk || !chunk.length) {
+    if (!chunk?.length) {
       cb()
       return
     }

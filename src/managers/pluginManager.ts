@@ -167,7 +167,10 @@ export default class PluginManager {
   /** Cache of loaded plugin entries. */
   public readonly loadedPlugins: Map<string, LoadedPluginEntry>
   /** Registered plugin hooks. */
-  private readonly hooks: Map<PluginHookName, Array<(...args: any[]) => void>>
+  private readonly hooks: Map<
+    PluginHookName,
+    Array<(...args: unknown[]) => void>
+  >
 
   /**
    * Creates a new plugin manager instance.
@@ -216,7 +219,7 @@ export default class PluginManager {
    */
   public registerHook(
     name: PluginHookName,
-    callback: (...args: any[]) => void
+    callback: (...args: unknown[]) => void
   ): void {
     if (!this.hooks.has(name)) {
       this.hooks.set(name, [])
@@ -230,7 +233,7 @@ export default class PluginManager {
    * @param args - Arguments to pass to the hook callbacks.
    * @public
    */
-  public callHook(name: PluginHookName, ...args: any[]): void {
+  public callHook(name: PluginHookName, ...args: unknown[]): void {
     const callbacks = this.hooks.get(name)
     if (!callbacks) return
 
@@ -252,7 +255,7 @@ export default class PluginManager {
    */
   public async callHookAsync(
     name: PluginHookName,
-    ...args: any[]
+    ...args: unknown[]
   ): Promise<void> {
     const callbacks = this.hooks.get(name)
     if (!callbacks) return

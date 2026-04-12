@@ -875,7 +875,7 @@ else {
     const handleLiveChat = async (id, socketPath, payload) => {
         const videoId = payload.videoId;
         const yt = nodelink.sources?.getSource('youtube');
-        if (!yt || !yt.liveChat)
+        if (!yt?.liveChat)
             throw new Error('YouTube source or live chat not available in worker');
         activeChats.set(id, true);
         try {

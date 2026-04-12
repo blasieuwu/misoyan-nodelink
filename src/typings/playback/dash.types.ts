@@ -25,7 +25,11 @@ export interface DASHHandlerOptions {
   /** HTTP headers for segment requests. */
   headers?: Record<string, string>
   /** Proxy configuration. */
-  proxy?: { host: string; port: number; auth?: { username: string; password: string } }
+  proxy?: {
+    host: string
+    port: number
+    auth?: { username: string; password: string }
+  }
 }
 
 /**

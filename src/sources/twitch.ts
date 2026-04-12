@@ -567,7 +567,7 @@ export default class TwitchSource implements SourceInstance {
   private async _getClipStreamUrl(slug: string): Promise<TrackUrlResult> {
     try {
       const meta = await this._fetchClipMetadata(slug)
-      if (!meta || !meta.videoQualities?.length) {
+      if (!meta?.videoQualities?.length) {
         throw new Error('Clip metadata lookup failed.')
       }
 

@@ -613,7 +613,7 @@ export default class YandexMusicSource implements SourceInstance {
     }
 
     const album = data?.result
-    if (!album || !album.volumes?.length) {
+    if (!album?.volumes?.length) {
       const fallback = await this._resolveWithSongLink(
         `https://album.link/ya/${id}`,
         'album',

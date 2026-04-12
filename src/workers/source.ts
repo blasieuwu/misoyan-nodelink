@@ -14,7 +14,10 @@ import {
   workerData as rawWorkerData,
   Worker
 } from 'node:worker_threads'
+
 import type PluginManager from '../managers/pluginManager.ts'
+import type { PluginManagerContext } from '../managers/pluginManager.ts'
+
 import type { NodeLink } from '../typings/playback/player.types.ts'
 import type {
   FrameType,
@@ -124,7 +127,9 @@ if (isMainThread) {
   const { default: PluginManagerClass } = await import(
     '../managers/pluginManager.ts'
   )
-  nodelink.pluginManager = new PluginManagerClass(nodelink as any)
+  nodelink.pluginManager = new PluginManagerClass(
+    nodelink as unknown as PluginManagerContext
+  )
   await nodelink.pluginManager.load('source-worker')
 
   const maxThreadCount = Math.max(
@@ -573,7 +578,9 @@ if (isMainThread) {
   const { default: PluginManagerClass } = await import(
     '../managers/pluginManager.ts'
   )
-  nodelink.pluginManager = new PluginManagerClass(nodelink as any)
+  nodelink.pluginManager = new PluginManagerClass(
+    nodelink as unknown as PluginManagerContext
+  )
   await nodelink.pluginManager.load('micro-worker')
 
   /**
@@ -1190,7 +1197,7 @@ if (isMainThread) {
   ): Promise<void> => {
     const videoId = payload.videoId
     const yt = nodelink.sources?.getSource('youtube')
-    if (!yt || !yt.liveChat)
+    if (!yt?.liveChat)
       throw new Error('YouTube source or live chat not available in worker')
 
     activeChats.set(id, true)

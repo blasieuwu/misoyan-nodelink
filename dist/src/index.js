@@ -1274,7 +1274,6 @@ class NodelinkServer extends EventEmitter {
             }
         });
         this.socket?.on('/v4/websocket/voice', (socket, request, _clientInfo, _sessionId, guildId) => {
-            ;
             socket.guildId = guildId;
             if (!this.options.voiceReceive?.enabled) {
                 try {

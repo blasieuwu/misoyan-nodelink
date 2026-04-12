@@ -839,7 +839,7 @@ export default class AmazonMusicSource implements SourceInstance {
         let entity = parsed.entitiesByUniqueId[parsed.entityUniqueId] as
           | OdesliEntity
           | undefined
-        if (targetId && (!entity || !entity.id.includes(targetId))) {
+        if (targetId && !entity?.id.includes(targetId)) {
           entity = Object.values(parsed.entitiesByUniqueId).find((e) => {
             const typedE = e as unknown as OdesliEntity
             return typeof typedE.id === 'string' && typedE.id.includes(targetId)

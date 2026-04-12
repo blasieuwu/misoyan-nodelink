@@ -768,7 +768,7 @@ class NodelinkServer extends EventEmitter {
                   'onWebSocketMessage',
                   socket,
                   parsedData,
-                  (socket as any).guildId
+                  socket.guildId
                 )
 
                 listener(...args)
@@ -1851,7 +1851,7 @@ class NodelinkServer extends EventEmitter {
         _sessionId: string,
         guildId: string
       ) => {
-        ;(socket as any).guildId = guildId
+        socket.guildId = guildId
 
         if (!this.options.voiceReceive?.enabled) {
           try {
@@ -1880,7 +1880,7 @@ class NodelinkServer extends EventEmitter {
         id: string
       ) => {
         let videoId = id
-        ;(socket as any).guildId = id // Tag it with videoId or guildId equivalent
+        socket.guildId = id // Tag it with videoId or guildId equivalent
 
         if (/^\d{17,20}$/.test(id)) {
           const player = this.sessions.getPlayer(id)

@@ -458,7 +458,7 @@ export default class TwitchSource {
     async _getClipStreamUrl(slug) {
         try {
             const meta = await this._fetchClipMetadata(slug);
-            if (!meta || !meta.videoQualities?.length) {
+            if (!meta?.videoQualities?.length) {
                 throw new Error('Clip metadata lookup failed.');
             }
             // Select highest quality variant

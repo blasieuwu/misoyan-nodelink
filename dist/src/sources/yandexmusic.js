@@ -478,7 +478,7 @@ export default class YandexMusicSource {
             return fallback || { loadType: 'empty', data: {} };
         }
         const album = data?.result;
-        if (!album || !album.volumes?.length) {
+        if (!album?.volumes?.length) {
             const fallback = await this._resolveWithSongLink(`https://album.link/ya/${id}`, 'album', id);
             return fallback || { loadType: 'empty', data: {} };
         }

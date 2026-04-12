@@ -222,11 +222,7 @@ export default class LyricsManager {
     language?: string,
     skipTrackSource = false
   ): Promise<LyricsLoadResult> {
-    if (
-      !decodedTrack ||
-      !decodedTrack.info?.sourceName ||
-      !decodedTrack.info?.uri
-    ) {
+    if (!decodedTrack?.info?.sourceName || !decodedTrack.info?.uri) {
       logger(
         'warn',
         'Lyrics',

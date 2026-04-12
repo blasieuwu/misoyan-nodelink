@@ -351,7 +351,7 @@ export default class MixcloudSource {
                 playlistName = playlist.name || playlistName;
                 for (const edge of playlist.items.edges || []) {
                     const track = edge.node?.cloudcast;
-                    if (!track || !track.url)
+                    if (!track?.url)
                         continue;
                     tracks.push(this._parseTrackData(track));
                     if (tracks.length >= maxTracks)

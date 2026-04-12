@@ -416,7 +416,7 @@ export default class GoogleDriveSource {
             format
         };
     }
-    async loadStream(_track, url) {
+    async loadStream(_track, url, _protocol, additionalData) {
         const { cookieHeader } = await this._getCookiesAndAuthHeader(`https://drive.google.com/file/d/${_track.identifier}/view`, 'https://drive.google.com');
         const headers = {
             'User-Agent': this.userAgent,
@@ -528,6 +528,8 @@ export default class GoogleDriveSource {
         let reconnecting = false;
         let streamEnded = false;
         let reconnectStreak = 0;
+        const guildId = String(additionalData?.guildId || 'unbound');
+        const streamContext = `guildId=${guildId} trackId=${_track.identifier} title="${String(_track.title || '-').replace(/"/g, "'")}"`;
         const wait = async (ms) => {
             await new Promise((resolve) => {
                 const timeout = setTimeout(resolve, ms);
@@ -554,7 +556,7 @@ export default class GoogleDriveSource {
                     chunkToWrite[2] === 0x33) {
                     const tagSize = this._readSynchsafeInt(chunkToWrite.subarray(6, 10));
                     bytesToSkip = Math.min(10 + tagSize, maxId3SkipBytes);
-                    logger('debug', 'GoogleDrive', `Skipping initial ID3 tag (${bytesToSkip} bytes) for ${url}`);
+                    logger('debug', 'GoogleDrive', `[${streamContext}] skipping initial ID3 tag bytes=${bytesToSkip} url=${url}`);
                 }
                 headerParsed = true;
             }
@@ -578,7 +580,7 @@ export default class GoogleDriveSource {
                 finalStream.write(pendingHeader);
                 pendingHeader = Buffer.alloc(0);
             }
-            logger('debug', 'GoogleDrive', `Stream ended for ${url}, emitting finishBuffering.`);
+            logger('debug', 'GoogleDrive', `[${streamContext}] stream ended url=${url}, emitting finishBuffering`);
             finalStream.emit('finishBuffering');
             finalStream.end();
         };
@@ -590,7 +592,7 @@ export default class GoogleDriveSource {
                 void tryReconnect(message);
                 return;
             }
-            logger('error', 'GoogleDrive', `Stream error: ${message}`);
+            logger('error', 'GoogleDrive', `[${streamContext}] stream error: ${message}`);
             finalStream.destroy(err);
         };
         const detachCurrent = () => {
@@ -618,7 +620,7 @@ export default class GoogleDriveSource {
                 !finalStream.writableEnded) {
                 reconnectStreak++;
                 const delayMs = Math.min(300 * 2 ** Math.min(reconnectStreak - 1, 5), 5000);
-                logger('debug', 'GoogleDrive', `Stream disconnected (${reason}), retry #${reconnectStreak} from byte ${totalSourceBytesRead} in ${delayMs}ms.`);
+                logger('debug', 'GoogleDrive', `[${streamContext}] disconnected reason=${reason} retry=${reconnectStreak} offset=${totalSourceBytesRead} delayMs=${delayMs} url=${activeStreamUrl}`);
                 await wait(delayMs);
                 if (streamEnded || finalStream.destroyed || finalStream.writableEnded)
                     break;
@@ -645,7 +647,7 @@ export default class GoogleDriveSource {
                     reconnecting = false;
                     return;
                 }
-                logger('debug', 'GoogleDrive', `Reconnect failed for ${activeStreamUrl}: ${resumed.error || resumed.statusCode}`);
+                logger('debug', 'GoogleDrive', `[${streamContext}] reconnect failed url=${activeStreamUrl} statusOrError=${resumed.error || resumed.statusCode}`);
                 if (resumed.statusCode === 403 || resumed.statusCode === 404) {
                     const refreshed = await this.getTrackUrl(_track);
                     if (refreshed.url) {

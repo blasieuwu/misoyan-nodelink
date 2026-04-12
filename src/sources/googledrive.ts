@@ -538,7 +538,9 @@ export default class GoogleDriveSource implements SourceInstance {
 
   public async loadStream(
     _track: TrackInfo,
-    url: string
+    url: string,
+    _protocol?: string,
+    additionalData?: Record<string, unknown>
   ): Promise<TrackStreamResult> {
     const { cookieHeader } = await this._getCookiesAndAuthHeader(
       `https://drive.google.com/file/d/${_track.identifier}/view`,
@@ -663,6 +665,8 @@ export default class GoogleDriveSource implements SourceInstance {
     let reconnecting = false
     let streamEnded = false
     let reconnectStreak = 0
+    const guildId = String(additionalData?.guildId || 'unbound')
+    const streamContext = `guildId=${guildId} trackId=${_track.identifier} title="${String(_track.title || '-').replace(/"/g, "'")}"`
 
     const wait = async (ms: number): Promise<void> => {
       await new Promise<void>((resolve) => {
@@ -697,7 +701,7 @@ export default class GoogleDriveSource implements SourceInstance {
           logger(
             'debug',
             'GoogleDrive',
-            `Skipping initial ID3 tag (${bytesToSkip} bytes) for ${url}`
+            `[${streamContext}] skipping initial ID3 tag bytes=${bytesToSkip} url=${url}`
           )
         }
 
@@ -728,7 +732,7 @@ export default class GoogleDriveSource implements SourceInstance {
       logger(
         'debug',
         'GoogleDrive',
-        `Stream ended for ${url}, emitting finishBuffering.`
+        `[${streamContext}] stream ended url=${url}, emitting finishBuffering`
       )
       finalStream.emit('finishBuffering')
       finalStream.end()
@@ -745,7 +749,11 @@ export default class GoogleDriveSource implements SourceInstance {
         return
       }
 
-      logger('error', 'GoogleDrive', `Stream error: ${message}`)
+      logger(
+        'error',
+        'GoogleDrive',
+        `[${streamContext}] stream error: ${message}`
+      )
       finalStream.destroy(err)
     }
 
@@ -783,7 +791,7 @@ export default class GoogleDriveSource implements SourceInstance {
         logger(
           'debug',
           'GoogleDrive',
-          `Stream disconnected (${reason}), retry #${reconnectStreak} from byte ${totalSourceBytesRead} in ${delayMs}ms.`
+          `[${streamContext}] disconnected reason=${reason} retry=${reconnectStreak} offset=${totalSourceBytesRead} delayMs=${delayMs} url=${activeStreamUrl}`
         )
         await wait(delayMs)
 
@@ -821,7 +829,7 @@ export default class GoogleDriveSource implements SourceInstance {
         logger(
           'debug',
           'GoogleDrive',
-          `Reconnect failed for ${activeStreamUrl}: ${resumed.error || resumed.statusCode}`
+          `[${streamContext}] reconnect failed url=${activeStreamUrl} statusOrError=${resumed.error || resumed.statusCode}`
         )
 
         if (resumed.statusCode === 403 || resumed.statusCode === 404) {

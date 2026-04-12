@@ -646,6 +646,7 @@ export class Player {
             // Keep both keys for source compatibility while seek handling is unified.
             additionalData.position = startTime;
         }
+        additionalData.guildId = this.guildId;
         additionalData.positionCallback = (positionMs) => {
             if (!Number.isFinite(positionMs) || positionMs < 0)
                 return;

@@ -475,9 +475,13 @@ export default class YandexMusicSource implements SourceInstance {
    */
   public async loadStream(
     _track: TrackInfo,
-    url: string
+    url: string,
+    _protocol?: string,
+    additionalData?: Record<string, unknown>
   ): Promise<TrackStreamResult> {
     const stream = new PassThrough()
+    const guildId = String(additionalData?.guildId || 'unbound')
+    const streamContext = `guildId=${guildId} trackId=${_track.identifier} title="${String(_track.title || '-').replace(/"/g, "'")}"`
     try {
       const requestStream = async (
         streamUrl: string,
@@ -579,7 +583,7 @@ export default class YandexMusicSource implements SourceInstance {
           logger(
             'debug',
             'YandexMusic',
-            `Yandex stream disconnected (${reason}), retry #${consecutiveReconnectFailures} from byte ${bytesRead} in ${delay}ms.`
+            `[${streamContext}] disconnected reason=${reason} retry=${consecutiveReconnectFailures} offset=${bytesRead} delayMs=${delay} url=${currentUrl}`
           )
           await wait(delay)
           if (ended || stream.destroyed || stream.writableEnded) break
@@ -631,7 +635,11 @@ export default class YandexMusicSource implements SourceInstance {
           return
         }
 
-        logger('error', 'YandexMusic', `CDN stream error: ${message}`)
+        logger(
+          'error',
+          'YandexMusic',
+          `[${streamContext}] CDN stream error: ${message}`
+        )
         if (!stream.destroyed) stream.destroy(err)
       }
 
@@ -655,7 +663,11 @@ export default class YandexMusicSource implements SourceInstance {
       return { stream, type: 'audio/mpeg' }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      logger('error', 'YandexMusic', `Stream loading failed: ${message}`)
+      logger(
+        'error',
+        'YandexMusic',
+        `[${streamContext}] stream loading failed: ${message}`
+      )
       if (!stream.destroyed)
         stream.destroy(e instanceof Error ? e : new Error(message))
       return { exception: { message, severity: 'fault' } }

@@ -375,8 +375,10 @@ export default class YandexMusicSource {
      * @returns A promise resolving to the readable stream and content type.
      * @public
      */
-    async loadStream(_track, url) {
+    async loadStream(_track, url, _protocol, additionalData) {
         const stream = new PassThrough();
+        const guildId = String(additionalData?.guildId || 'unbound');
+        const streamContext = `guildId=${guildId} trackId=${_track.identifier} title="${String(_track.title || '-').replace(/"/g, "'")}"`;
         try {
             const requestStream = async (streamUrl, startByte = 0) => {
                 const headers = startByte > 0 ? { Range: `bytes=${startByte}-` } : undefined;
@@ -458,7 +460,7 @@ export default class YandexMusicSource {
                 while (!ended && !stream.destroyed && !stream.writableEnded) {
                     consecutiveReconnectFailures++;
                     const delay = Math.min(300 * 2 ** Math.min(consecutiveReconnectFailures - 1, 5), 5000);
-                    logger('debug', 'YandexMusic', `Yandex stream disconnected (${reason}), retry #${consecutiveReconnectFailures} from byte ${bytesRead} in ${delay}ms.`);
+                    logger('debug', 'YandexMusic', `[${streamContext}] disconnected reason=${reason} retry=${consecutiveReconnectFailures} offset=${bytesRead} delayMs=${delay} url=${currentUrl}`);
                     await wait(delay);
                     if (ended || stream.destroyed || stream.writableEnded)
                         break;
@@ -499,7 +501,7 @@ export default class YandexMusicSource {
                     void reconnect(message);
                     return;
                 }
-                logger('error', 'YandexMusic', `CDN stream error: ${message}`);
+                logger('error', 'YandexMusic', `[${streamContext}] CDN stream error: ${message}`);
                 if (!stream.destroyed)
                     stream.destroy(err);
             };
@@ -521,7 +523,7 @@ export default class YandexMusicSource {
         }
         catch (e) {
             const message = e instanceof Error ? e.message : String(e);
-            logger('error', 'YandexMusic', `Stream loading failed: ${message}`);
+            logger('error', 'YandexMusic', `[${streamContext}] stream loading failed: ${message}`);
             if (!stream.destroyed)
                 stream.destroy(e instanceof Error ? e : new Error(message));
             return { exception: { message, severity: 'fault' } };

@@ -660,13 +660,20 @@ export default class GoogleDriveSource implements SourceInstance {
     let totalSourceBytesRead = 0
     let activeStreamUrl = request.finalUrl || url
     let currentStream: Readable | null = null
-    let reconnectAttempts = 0
-    const maxReconnectAttempts = 2
     let reconnecting = false
     let streamEnded = false
+    let reconnectStreak = 0
+
+    const wait = async (ms: number): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(resolve, ms)
+        if (typeof timeout.unref === 'function') timeout.unref()
+      })
+    }
 
     const onData = (chunk: Buffer): void => {
       totalSourceBytesRead += chunk.length
+      if (reconnectStreak > 0) reconnectStreak = 0
       let chunkToWrite = chunk
 
       if (!headerParsed) {
@@ -761,54 +768,71 @@ export default class GoogleDriveSource implements SourceInstance {
       if (streamEnded || finalStream.destroyed || finalStream.writableEnded)
         return
       if (reconnecting) return
-      if (reconnectAttempts >= maxReconnectAttempts) {
+      reconnecting = true
+
+      while (
+        !streamEnded &&
+        !finalStream.destroyed &&
+        !finalStream.writableEnded
+      ) {
+        reconnectStreak++
+        const delayMs = Math.min(
+          300 * 2 ** Math.min(reconnectStreak - 1, 5),
+          5000
+        )
         logger(
           'debug',
           'GoogleDrive',
-          `Stream disconnected (${reason}) after ${reconnectAttempts} retries, ending stream.`
+          `Stream disconnected (${reason}), retry #${reconnectStreak} from byte ${totalSourceBytesRead} in ${delayMs}ms.`
         )
-        finalStream.emit('finishBuffering')
-        finalStream.end()
-        return
-      }
+        await wait(delayMs)
 
-      reconnecting = true
-      reconnectAttempts++
-      logger(
-        'debug',
-        'GoogleDrive',
-        `Stream disconnected (${reason}), retrying ${reconnectAttempts}/${maxReconnectAttempts} from byte ${totalSourceBytesRead}.`
-      )
+        if (streamEnded || finalStream.destroyed || finalStream.writableEnded)
+          break
 
-      const reconnectHeaders: Record<string, string> = {
-        ...headers,
-        Range: `bytes=${totalSourceBytesRead}-`
-      }
-      const resumed = await http1makeRequest(activeStreamUrl, {
-        method: 'GET',
-        streamOnly: true,
-        maxRedirects: 10,
-        headers: reconnectHeaders
-      })
+        const reconnectHeaders: Record<string, string> = {
+          ...headers,
+          Range: `bytes=${totalSourceBytesRead}-`
+        }
+        const resumed = await http1makeRequest(activeStreamUrl, {
+          method: 'GET',
+          streamOnly: true,
+          maxRedirects: 10,
+          headers: reconnectHeaders
+        })
 
-      reconnecting = false
-      if (
-        resumed.error ||
-        !resumed.stream ||
-        (resumed.statusCode || 0) >= 400
-      ) {
+        if (resumed.statusCode === 416) {
+          finalStream.emit('finishBuffering')
+          finalStream.end()
+          break
+        }
+
+        if (
+          !resumed.error &&
+          resumed.stream &&
+          (resumed.statusCode || 0) < 400
+        ) {
+          activeStreamUrl = resumed.finalUrl || activeStreamUrl
+          attachStream(resumed.stream as Readable)
+          reconnecting = false
+          return
+        }
+
         logger(
           'debug',
           'GoogleDrive',
           `Reconnect failed for ${activeStreamUrl}: ${resumed.error || resumed.statusCode}`
         )
-        finalStream.emit('finishBuffering')
-        finalStream.end()
-        return
+
+        if (resumed.statusCode === 403 || resumed.statusCode === 404) {
+          const refreshed = await this.getTrackUrl(_track)
+          if (refreshed.url) {
+            activeStreamUrl = refreshed.url
+          }
+        }
       }
 
-      activeStreamUrl = resumed.finalUrl || activeStreamUrl
-      attachStream(resumed.stream as Readable)
+      reconnecting = false
     }
 
     finalStream.on('drain', () => {

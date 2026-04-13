@@ -41,7 +41,7 @@ function getItagFromQuery(parsedUrl) {
  */
 function getTrackStreamRuntime(nodelink) {
     const runtime = nodelink;
-    if (runtime.workerManager === undefined || !runtime.sources) {
+    if (runtime.workerManager === undefined || runtime.sources === undefined) {
         return null;
     }
     return runtime;

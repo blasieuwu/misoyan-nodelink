@@ -156,7 +156,7 @@ function getTrackStreamRuntime(
 ): TrackStreamRuntime | null {
   const runtime = nodelink as ApiNodelinkServer & Partial<TrackStreamRuntime>
 
-  if (runtime.workerManager === undefined || !runtime.sources) {
+  if (runtime.workerManager === undefined || runtime.sources === undefined) {
     return null
   }
 

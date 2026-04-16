@@ -39,7 +39,7 @@ function getLoadLyricsRuntime(nodelink) {
     const runtime = nodelink;
     if (runtime.sourceWorkerManager === undefined ||
         runtime.workerManager === undefined ||
-        !runtime.lyrics) {
+        runtime.lyrics === undefined) {
         return null;
     }
     return runtime;

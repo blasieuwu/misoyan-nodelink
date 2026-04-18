@@ -1824,4 +1824,64 @@ function cleanupLogger() {
         logStream = null;
     }
 }
-export { applyEnvOverrides, checkForUpdates, cleanupHttpAgents, cleanupLogger, decodeTrack, encodeTrack, generateRandomLetters, getBestMatch, getGitInfo, getStats, getVersion, http1makeRequest, initLogger, logger, makeRequest, parseClient, parseSemver, sendErrorResponse, sendResponse, validateProperty, verifyDiscordID, verifyMethod };
+/**
+ * Fetches SponsorBlock segments for a YouTube video with privacy prefixing.
+ *
+ * Calculates the SHA256 prefix and queries the public SponsorBlock API,
+ * then filters results for the exact video ID and maps them to the
+ * local segment interface with milliseconds timestamps.
+ *
+ * @param videoId - Target YouTube video identifier.
+ * @param categories - Array of categories to retrieve.
+ * @param actionTypes - Array of action types to retrieve.
+ * @param apiBase - Optional API base URL override.
+ * @param proxy - Optional proxy for the request.
+ * @returns Promise resolving to the list of segments found.
+ * @public
+ */
+async function fetchSponsorBlockSegments(videoId, categories, actionTypes, apiBase = 'https://sponsor.ajay.app', proxy) {
+    const hash = crypto.createHash('sha256').update(videoId).digest('hex');
+    const prefix = hash.substring(0, 4);
+    const params = new URLSearchParams();
+    for (const cat of categories)
+        params.append('category', cat);
+    for (const action of actionTypes)
+        params.append('actionType', action);
+    const url = `${apiBase.replace(/\/+$/, '')}/api/skipSegments/${prefix}?${params.toString()}`;
+    logger('debug', 'SponsorBlock', `Fetching segments for video ${videoId} (prefix: ${prefix}) from ${url}`);
+    try {
+        const startTime = Date.now();
+        const result = await makeRequest(url, { method: 'GET', proxy });
+        const duration = Date.now() - startTime;
+        if (result.statusCode !== 200) {
+            logger('warn', 'SponsorBlock', `API returned status ${result.statusCode} for video ${videoId} after ${duration}ms`);
+            return [];
+        }
+        if (!Array.isArray(result.body)) {
+            logger('debug', 'SponsorBlock', `No segments found for prefix ${prefix} (Status: ${result.statusCode}, Duration: ${duration}ms)`);
+            return [];
+        }
+        const videoMatch = result.body.find((entry) => entry.videoID === videoId);
+        if (!videoMatch?.segments) {
+            logger('debug', 'SponsorBlock', `No exact match for video ${videoId} in prefix results (Results: ${result.body.length}, Duration: ${duration}ms)`);
+            return [];
+        }
+        logger('debug', 'SponsorBlock', `Successfully loaded ${videoMatch.segments.length} segments for video ${videoId} in ${duration}ms`);
+        return videoMatch.segments.map((s) => ({
+            uuid: s.UUID,
+            start: Math.round(s.segment[0] * 1000),
+            end: Math.round(s.segment[1] * 1000),
+            category: s.category,
+            actionType: s.actionType,
+            votes: s.votes,
+            locked: s.locked === 1,
+            videoDuration: Math.round(s.videoDuration * 1000),
+            description: s.description || ''
+        }));
+    }
+    catch (error) {
+        logger('warn', 'SponsorBlock', `Failed to fetch segments for video ${videoId}:`, error);
+        return [];
+    }
+}
+export { applyEnvOverrides, checkForUpdates, cleanupHttpAgents, cleanupLogger, decodeTrack, encodeTrack, fetchSponsorBlockSegments, generateRandomLetters, getBestMatch, getGitInfo, getStats, getVersion, http1makeRequest, initLogger, logger, makeRequest, parseClient, parseSemver, sendErrorResponse, sendResponse, validateProperty, verifyDiscordID, verifyMethod };

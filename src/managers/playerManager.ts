@@ -8,7 +8,9 @@ import type {
   PlayerStateJSON,
   PlayerTrack,
   PlayerVoiceState,
-  PlayPayload
+  PlayPayload,
+  PlayerSponsorBlockState,
+  SponsorBlockSegment
 } from '../typings/playback/player.types.ts'
 import { logger } from '../utils.ts'
 
@@ -884,6 +886,73 @@ export default class PlayerManager {
 
     const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
     await player.unsubscribeLyrics()
+    return undefined
+  }
+
+  /**
+   * Returns current SponsorBlock state for a player.
+   */
+  getSponsorBlock(
+    guildId: string
+  ): PlayerSponsorBlockState | PlayerCommandResponse {
+    if (this.isCluster) {
+      return this.runClusterPlayerCommand(guildId, 'getSponsorBlock', []) as any
+    }
+
+    const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
+    return player.getSponsorBlock()
+  }
+
+  /**
+   * Updates SponsorBlock settings for a player.
+   */
+  async updateSponsorBlock(
+    guildId: string,
+    updates: Partial<
+      Omit<PlayerSponsorBlockState, 'segments' | 'lastSkippedUuid'>
+    >
+  ): Promise<PlayerCommandResponse | undefined> {
+    if (this.isCluster) {
+      return this.runClusterPlayerCommand(guildId, 'updateSponsorBlock', [
+        updates
+      ]) as any
+    }
+
+    const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
+    player.updateSponsorBlock(updates)
+    return undefined
+  }
+
+  /**
+   * Overrides SponsorBlock segments for a player.
+   */
+  async setSponsorBlockSegments(
+    guildId: string,
+    segments: SponsorBlockSegment[]
+  ): Promise<PlayerCommandResponse | undefined> {
+    if (this.isCluster) {
+      return this.runClusterPlayerCommand(guildId, 'setSponsorBlockSegments', [
+        segments
+      ]) as any
+    }
+
+    const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
+    player.setSponsorBlockSegments(segments)
+    return undefined
+  }
+
+  /**
+   * Clears SponsorBlock state for a player.
+   */
+  async clearSponsorBlock(
+    guildId: string
+  ): Promise<PlayerCommandResponse | undefined> {
+    if (this.isCluster) {
+      return this.runClusterPlayerCommand(guildId, 'clearSponsorBlock', []) as any
+    }
+
+    const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
+    player.clearSponsorBlock()
     return undefined
   }
 }

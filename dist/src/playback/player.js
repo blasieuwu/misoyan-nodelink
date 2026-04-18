@@ -52,6 +52,7 @@ export class Player {
         channelId: null
     };
     streamInfo = null;
+    sponsorBlock;
     profilerStreamStats = {
         downloadedBytes: 0,
         totalBytes: null,
@@ -100,6 +101,23 @@ export class Player {
         this.fading = this.nodelink.options?.audio?.fading;
         this.loudnessNormalizer =
             this.nodelink.options?.audio?.loudnessNormalizer ?? false;
+        this.sponsorBlock = {
+            enabled: this.nodelink.options.sponsorblock?.enabled ?? false,
+            categories: this.nodelink.options.sponsorblock?.categories ?? [
+                'sponsor',
+                'selfpromo',
+                'interaction',
+                'intro',
+                'outro',
+                'preview',
+                'music_offtopic',
+                'filler'
+            ],
+            actionTypes: this.nodelink.options.sponsorblock?.actionTypes ?? ['skip'],
+            segments: [],
+            lastSkippedUuid: null,
+            skipMarginMs: this.nodelink.options.sponsorblock?.skipMarginMs ?? 150
+        };
         logger('debug', 'Player', `New player created for guild ${this.guildId} in session ${this.session.id}`);
         this.emitEvent = (type, payload = {}) => {
             this.nodelink.statsManager.incrementPlaybackEvent(type);
@@ -722,6 +740,12 @@ export class Player {
             this.destroying)
             return false;
         const position = this._realPosition();
+        if (this.sponsorBlock.enabled && this.track) {
+            // Periodic log to verify position and sb state
+            if (Math.abs(position - this._lastPosition) > 1000 || this._lastPosition === 0) {
+                logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Current position: ${Math.round(position)}ms, Segments: ${this.sponsorBlock.segments.length}, LastSkipped: ${this.sponsorBlock.lastSkippedUuid}`);
+            }
+        }
         const threshold = this.nodelink.options.trackStuckThresholdMs;
         if (threshold > 0 &&
             !this.isUpdatingTrack &&
@@ -831,6 +855,42 @@ export class Player {
         }
         this._lastPosition = position;
         this._syncLyrics();
+        if (this.sponsorBlock.enabled &&
+            !this.isPaused &&
+            this.track &&
+            !this._isResuming &&
+            !this._isRecovering &&
+            !this._isSeeking) {
+            const segment = this.sponsorBlock.segments.find((s) => this.sponsorBlock.categories.includes(s.category) &&
+                this.sponsorBlock.actionTypes.includes(s.actionType) &&
+                position + this.sponsorBlock.skipMarginMs >= s.start &&
+                position < s.end &&
+                this.sponsorBlock.lastSkippedUuid !== s.uuid);
+            if (segment) {
+                this.sponsorBlock.lastSkippedUuid = segment.uuid;
+                const skippedMs = segment.end - position;
+                logger('info', 'Player', `[SponsorBlock][${this.guildId}] Skipping segment: uuid=${segment.uuid} category=${segment.category} start=${segment.start}ms end=${segment.end}ms (Skipped: ${skippedMs}ms) for video ${this.track.info.identifier}`);
+                this.seek(segment.end)
+                    .then((success) => {
+                    if (success) {
+                        logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Successfully jumped to ${segment.end}ms`);
+                        this.emitEvent(GatewayEvents.SPONSORBLOCK_SEGMENT_SKIPPED, {
+                            segment,
+                            skippedMs
+                        });
+                    }
+                    else {
+                        logger('warn', 'Player', `[SponsorBlock][${this.guildId}] Failed to jump to ${segment.end}ms for segment ${segment.uuid}`);
+                    }
+                })
+                    .catch((err) => {
+                    logger('error', 'Player', `[SponsorBlock][${this.guildId}] Error while seeking to segment end:`, err);
+                });
+                return true;
+            }
+        }
+        if (this._isSeeking)
+            return true;
         this.session.socket.send(JSON.stringify({
             op: GatewayEvents.PLAYER_UPDATE,
             guildId: this.guildId,
@@ -903,6 +963,39 @@ export class Player {
         await this.waitEvent('playerStateChange', (s) => s.status === 'playing');
         this._lyricsBasePosition = startTime || 0;
         this._lyricsBasePackets = this.connection?.statistics?.packetsExpected ?? 0;
+        if (this.track.info.sourceName === 'youtube' ||
+            this.track.info.sourceName === 'ytmusic') {
+            this.sponsorBlock.segments = [];
+            this.sponsorBlock.lastSkippedUuid = null;
+            const videoId = this.track.info.identifier;
+            const sbConfig = this.nodelink.options.sponsorblock;
+            if (this.sponsorBlock.enabled) {
+                logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Initiating segment fetch for video ${videoId}`);
+                const { fetchSponsorBlockSegments } = await import("../utils.js");
+                fetchSponsorBlockSegments(videoId, this.sponsorBlock.categories, this.sponsorBlock.actionTypes, sbConfig?.api)
+                    .then((segments) => {
+                    if (this.destroying || !this.track || this.track.info.identifier !== videoId) {
+                        logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Ignoring fetched segments for ${videoId} (track changed or player destroyed)`);
+                        return;
+                    }
+                    this.sponsorBlock.segments = segments;
+                    logger('info', 'Player', `[SponsorBlock][${this.guildId}] Applied ${segments.length} segments for video ${videoId}`);
+                    if (segments.length > 0) {
+                        this.emitEvent(GatewayEvents.SPONSORBLOCK_SEGMENTS_LOADED, {
+                            segments
+                        });
+                        // Immediate check after load
+                        this._sendUpdate();
+                    }
+                })
+                    .catch((err) => {
+                    logger('error', 'Player', `[SponsorBlock][${this.guildId}] Error fetching segments for ${videoId}:`, err);
+                });
+            }
+            else {
+                logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Auto-skip disabled, skipping segment fetch for ${videoId}`);
+            }
+        }
         return true;
     }
     /**
@@ -1773,7 +1866,7 @@ export class Player {
     /**
      * Unsubscribes from lyrics events.
      */
-    async unsubscribeLyrics() {
+    unsubscribeLyrics() {
         return new Promise((resolve) => {
             this.isLyricsSubscribed = false;
             this.skipTrackSource = false;
@@ -1785,6 +1878,43 @@ export class Player {
             }
             return resolve();
         });
+    }
+    /**
+     * Returns current SponsorBlock state for the player.
+     *
+     * @returns Current segments and configuration.
+     */
+    getSponsorBlock() {
+        return this.sponsorBlock;
+    }
+    /**
+     * Updates SponsorBlock settings for the player.
+     *
+     * @param updates - Configuration updates.
+     */
+    updateSponsorBlock(updates) {
+        if (updates.enabled !== undefined)
+            this.sponsorBlock.enabled = updates.enabled;
+        if (updates.categories !== undefined)
+            this.sponsorBlock.categories = updates.categories;
+        if (updates.actionTypes !== undefined)
+            this.sponsorBlock.actionTypes = updates.actionTypes;
+    }
+    /**
+     * Overrides SponsorBlock segments for the current track.
+     *
+     * @param segments - Array of segments to apply.
+     */
+    setSponsorBlockSegments(segments) {
+        this.sponsorBlock.segments = segments;
+        this.sponsorBlock.lastSkippedUuid = null;
+    }
+    /**
+     * Clears SponsorBlock state for the player.
+     */
+    clearSponsorBlock() {
+        this.sponsorBlock.segments = [];
+        this.sponsorBlock.lastSkippedUuid = null;
     }
     /**
      * Loads lyrics for the current track and emits events.

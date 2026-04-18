@@ -496,4 +496,51 @@ export default class PlayerManager {
         await player.unsubscribeLyrics();
         return undefined;
     }
+    /**
+     * Returns current SponsorBlock state for a player.
+     */
+    getSponsorBlock(guildId) {
+        if (this.isCluster) {
+            return this.runClusterPlayerCommand(guildId, 'getSponsorBlock', []);
+        }
+        const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId));
+        return player.getSponsorBlock();
+    }
+    /**
+     * Updates SponsorBlock settings for a player.
+     */
+    async updateSponsorBlock(guildId, updates) {
+        if (this.isCluster) {
+            return this.runClusterPlayerCommand(guildId, 'updateSponsorBlock', [
+                updates
+            ]);
+        }
+        const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId));
+        player.updateSponsorBlock(updates);
+        return undefined;
+    }
+    /**
+     * Overrides SponsorBlock segments for a player.
+     */
+    async setSponsorBlockSegments(guildId, segments) {
+        if (this.isCluster) {
+            return this.runClusterPlayerCommand(guildId, 'setSponsorBlockSegments', [
+                segments
+            ]);
+        }
+        const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId));
+        player.setSponsorBlockSegments(segments);
+        return undefined;
+    }
+    /**
+     * Clears SponsorBlock state for a player.
+     */
+    async clearSponsorBlock(guildId) {
+        if (this.isCluster) {
+            return this.runClusterPlayerCommand(guildId, 'clearSponsorBlock', []);
+        }
+        const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId));
+        player.clearSponsorBlock();
+        return undefined;
+    }
 }

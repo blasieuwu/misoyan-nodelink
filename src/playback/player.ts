@@ -150,6 +150,7 @@ export class Player {
   private _isStopping = false
   private _pausedAtPosition: number | undefined = undefined
   public stuckRecoveryCount = 0
+  private static MAX_STUCK_RECOVERY_ATTEMPTS = 3
 
   constructor(options: PlayerOptions) {
     if (
@@ -1177,10 +1178,29 @@ export class Player {
             return false
           }
 
+          if (
+            this.stuckRecoveryCount >=
+            Player.MAX_STUCK_RECOVERY_ATTEMPTS
+          ) {
+            logger(
+              'error',
+              'Player',
+              `Player for guild ${this.guildId} exceeded max recovery attempts (${Player.MAX_STUCK_RECOVERY_ATTEMPTS}). Stopping track.`
+            )
+            this.emitEvent(GatewayEvents.TRACK_STUCK, {
+              guildId: this.guildId,
+              track: this.track,
+              thresholdMs: threshold,
+              reason: 'Max recovery attempts exceeded'
+            })
+            this.stop()
+            return false
+          }
+
           logger(
             'warn',
             'Player',
-            `Player for guild ${this.guildId} is stuck. Attempting to recover...`,
+            `Player for guild ${this.guildId} is stuck. Attempting to recover... (attempt ${this.stuckRecoveryCount + 1}/${Player.MAX_STUCK_RECOVERY_ATTEMPTS})`,
             {
               lastPosition: this._lastPosition,
               currentPosition: position,
@@ -1243,9 +1263,10 @@ export class Player {
       }
     }
 
-    if (position !== this._lastPosition) {
-      this._lastStreamDataTime = Date.now()
-    }
+  if (position !== this._lastPosition) {
+    this._lastStreamDataTime = Date.now()
+    if (this.stuckRecoveryCount > 0) this.stuckRecoveryCount = 0
+  }
 
     this._lastPosition = position
     this._syncLyrics()

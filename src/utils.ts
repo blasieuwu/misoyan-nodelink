@@ -43,7 +43,7 @@ import type {
 
 declare const __BUILD_GIT_INFO__: GitInfo | undefined
 
-const isBun = typeof globalThis.Bun !== 'undefined'
+const isBun = typeof process !== "undefined" && process.versions?.bun;
 
 /**
  * Reference to the runtime NodeLink instance stored on the global object.
@@ -1649,8 +1649,9 @@ async function makeRequest(
   // fall back to HTTP/1 for Bun requests
   // Note: bun v1.3.12, crashes with "authority" argument must be a type of string, object or URL. received type Number (825110816)
   // Crashes the source worker ^^, could be related to monochrome's request or anything else that uses http/2
-  if (isBun) {
-    return http1makeRequest(urlString, options)
+  // UPDATE: Bun v1.3.13 has fixed this crash, since it was released today as this commit, i will be checking the version but can be removed later.
+  if (isBun && process.versions.bun.localeCompare('1.3.13', undefined, { numeric: true }) < 0) {
+    return http1makeRequest(urlString, options);
   }
 
   if (options.proxy) {

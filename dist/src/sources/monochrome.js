@@ -40,14 +40,16 @@ class MonochromeSource {
                 enabled: false
             };
         const defaultUrls = [
-            'https://singapore-1.monochrome.tf',
-            'https://ohio-1.monochrome.tf',
-            'https://frankfurt-1.monochrome.tf',
-            'https://hifi.geeked.wtf',
+            'https://tidal-api.binimum.org',
             'https://eu-central.monochrome.tf',
             'https://us-west.monochrome.tf',
-            'https://api.monochrome.tf',
-            'http://wolf.qqdl.site'
+            'https://triton.squid.wtf',
+            'https://hifi.geeked.wtf',
+            'https://wolf.qqdl.site',
+            'https://vogel.qqdl.site',
+            'https://katze.qqdl.site',
+            'https://hund.qqdl.site',
+            'https://api.monochrome.tf'
         ];
         const initPool = (urls) => urls.map((url) => ({
             url: url.replace(/\/$/, ''),
@@ -444,9 +446,7 @@ class MonochromeSource {
                 startTime: additionalData?.startTime || 0,
                 expectedDuration: decodedTrack.length,
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
-                    Referer: 'https://monochrome.tf/',
-                    Origin: 'https://monochrome.tf'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
             });
             const passthrough = new PassThrough({ highWaterMark: 256 * 1024 });

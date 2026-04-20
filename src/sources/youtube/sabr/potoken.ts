@@ -516,6 +516,7 @@ export class PoTokenManager {
       {
         url: 'https://www.youtube.com/',
         referrer: 'https://www.youtube.com/',
+        // @ts-expect-error does not exist constructor types, but it works internally.
         userAgent: PO_CONFIG.userAgent
       }
     )

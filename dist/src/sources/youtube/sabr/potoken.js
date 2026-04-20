@@ -336,6 +336,7 @@ export class PoTokenManager {
         this._dom = new JSDOM('<!DOCTYPE html><html lang="en"><head><title></title></head><body></body></html>', {
             url: 'https://www.youtube.com/',
             referrer: 'https://www.youtube.com/',
+            // @ts-expect-error does not exist constructor types, but it works internally.
             userAgent: PO_CONFIG.userAgent
         });
         this._applyDomGlobals(this._dom);

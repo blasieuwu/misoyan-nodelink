@@ -37,7 +37,7 @@ const getProxyAgent = async () => {
     proxyAgentInitAttempted = true;
     try {
         const mod = await import('proxy-agent');
-        ProxyAgent = (mod.ProxyAgent || mod.default);
+        ProxyAgent = (mod.ProxyAgent || mod.proxies);
     }
     catch {
         ProxyAgent = null;

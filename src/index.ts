@@ -2216,7 +2216,12 @@ class NodelinkServer extends EventEmitter {
     if (msg.type === 'playerEvent') {
       const { sessionId, data } = msg.payload
       const session = this.sessions.get(sessionId)
-      session?.socket?.send(data)
+      // [feat] session-resuming-queue: queue events when session is paused with resuming enabled
+      if (session?.isPaused && session.resuming) {
+        session.eventQueue.push(data)
+      } else {
+        session?.socket?.send(data)
+      }
     } else if (msg.type === 'workerStats') {
       if (this.workerManager) {
         const worker = this.workerManager.workers.find(

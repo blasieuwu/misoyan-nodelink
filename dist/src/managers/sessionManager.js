@@ -92,15 +92,21 @@ export default class SessionManager {
      * @param sessionId - The ID of the session to pause.
      */
     pause(sessionId) {
+        // [feat] session-resuming: guard double-pause and clear stale socket
+        if (this.resumableSessions.has(sessionId)) {
+            logger('debug', 'SessionManager', `Session ${sessionId} is already paused.`);
+            return;
+        }
         const session = this.activeSessions.get(sessionId);
         if (!session)
             return;
-        logger('info', 'SessionManager', `Pausing session ${sessionId} for ${session.timeout} seconds.`);
+        logger('info', 'SessionManager', `Pausing session ${sessionId} for resuming (timeout: ${session.timeout}s).`);
         this.activeSessions.delete(sessionId);
         session.isPaused = true;
+        session.socket = null;
         this.resumableSessions.set(sessionId, session);
         session.timeoutFuture = setTimeout(() => {
-            logger('info', 'SessionManager', `Session ${sessionId} resume timeout expired. Destroying.`);
+            logger('info', 'SessionManager', `Session ${sessionId} resume timeout expired after ${session.timeout}s. Destroying.`);
             this.resumableSessions.delete(sessionId);
             void this.destroy(session);
         }, session.timeout * 1000);

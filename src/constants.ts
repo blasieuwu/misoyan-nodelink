@@ -93,6 +93,8 @@ export const SEMVER_PATTERN =
  */
 export const PATH_VERSION = 'v4'
 
+export const MINIMUM_NODE_VERSION = '22.22.2'
+
 /**
  * HTTP status codes that indicate a redirect response
  *

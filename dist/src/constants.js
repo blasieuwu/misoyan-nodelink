@@ -88,6 +88,7 @@ export const SEMVER_PATTERN = /^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<p
  * @public
  */
 export const PATH_VERSION = 'v4';
+export const MINIMUM_NODE_VERSION = '22.22.2';
 /**
  * HTTP status codes that indicate a redirect response
  *

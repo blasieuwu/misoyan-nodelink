@@ -1,6 +1,6 @@
 {
   "name": "nodelink",
-  "version": "3.8.0-dev.20260420.1",
+  "version": "3.8.0-dev.20260422.1",
   "scripts": {
     "build": "tsc --incremental false",
     "start": "node --dns-result-order=ipv4first --import tsx src/index.ts",
@@ -12,6 +12,9 @@
   },
   "type": "module",
   "main": "src/index.ts",
+  "engines": {
+    "node": ">=22.22.2"
+  },
   "dependencies": {
     "@alexanderolsen/libsamplerate-js": "^2.1.2",
     "@ecliptia/faad2-wasm": "2.11.2-ecliptia.2",

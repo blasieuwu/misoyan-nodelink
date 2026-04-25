@@ -77,11 +77,42 @@ const getProxyAgent = async (): Promise<ProxyAgentConstructor | null> => {
   proxyAgentInitAttempted = true
   try {
     const mod = await import('proxy-agent')
-    ProxyAgent = (mod.ProxyAgent || mod.proxies) as ProxyAgentConstructor
+    const candidate =
+      (mod as { ProxyAgent?: unknown; default?: unknown }).ProxyAgent ||
+      (mod as { default?: { ProxyAgent?: unknown } }).default?.ProxyAgent ||
+      (mod as { default?: unknown }).default
+
+    ProxyAgent =
+      typeof candidate === 'function'
+        ? (candidate as ProxyAgentConstructor)
+        : null
   } catch {
     ProxyAgent = null
   }
   return ProxyAgent
+}
+
+const hasExplicitPort = (rawUrl: string): boolean => {
+  try {
+    const url = new URL(rawUrl)
+    if (url.port.length > 0) return true
+    return (rawUrl.match(/:(\d+)(?:\/|$)/)?.[1]?.length ?? 0) > 0
+  } catch {
+    return false
+  }
+}
+
+const shouldUseReverseProxy = (proxy?: HttpProxyConfig): boolean => {
+  if (!proxy) return false
+  if (proxy.type === 'reverse') return true
+
+  return (
+    proxy.type === undefined &&
+    !!proxy.url &&
+    !proxy.username &&
+    !proxy.password &&
+    !hasExplicitPort(proxy.url)
+  )
 }
 
 /**
@@ -1502,10 +1533,8 @@ async function http1makeRequest(
   while (true) {
     try {
       let finalUrl = urlString
-      if (
-        proxy?.type === 'reverse' ||
-        (proxy?.url && !proxy.username && !proxy.url.includes(':', 7))
-      ) {
+      const useReverseProxy = shouldUseReverseProxy(proxy)
+      if (useReverseProxy && proxy?.url) {
         finalUrl = `${proxy.url.replace(/\/+$/, '')}/${urlString}`
         logger(
           'debug',
@@ -1518,7 +1547,7 @@ async function http1makeRequest(
       const isHttps = url.protocol === 'https:'
       let agent = options.agent
 
-      if (!agent && proxy?.url && !finalUrl.startsWith(proxy.url)) {
+      if (!agent && proxy?.url && !useReverseProxy) {
         if (proxy?.url) {
           const proxyAgent = await getProxyAgent()
           if (proxyAgent) {

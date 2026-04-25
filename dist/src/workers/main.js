@@ -25,7 +25,7 @@ import StatsManager from "../managers/statsManager.js";
 import TrackCacheManager from "../managers/trackCacheManager.js";
 import { getWebmOpusProfilerStats } from "../playback/demuxers/WebmOpus.js";
 import { bufferPool } from "../playback/structs/BufferPool.js";
-import { cleanupHttpAgents, initLogger, logger } from "../utils.js";
+import { applyEnvOverrides, cleanupHttpAgents, initLogger, logger } from "../utils.js";
 import { createVoiceRelay } from "../voice/voiceRelay.js";
 import { createHeadQueue, dequeueHeadQueue, enqueueHeadQueue, getHeadQueueLength } from "./headQueue.js";
 let playerClassPromise = null;
@@ -65,6 +65,7 @@ catch {
     config = (await import(__rewriteRelativeImportExtension(resolveRootConfigUrl('config.default.js'))))
         .default;
 }
+applyEnvOverrides(config);
 const HIBERNATION_ENABLED = config.cluster?.hibernation?.enabled !== false;
 const HIBERNATION_TIMEOUT = config.cluster?.hibernation?.timeoutMs || 20 * 60 * 1000;
 const logging = config.logging;

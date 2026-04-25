@@ -37,12 +37,40 @@ const getProxyAgent = async () => {
     proxyAgentInitAttempted = true;
     try {
         const mod = await import('proxy-agent');
-        ProxyAgent = (mod.ProxyAgent || mod.proxies);
+        const candidate = mod.ProxyAgent ||
+            mod.default?.ProxyAgent ||
+            mod.default;
+        ProxyAgent =
+            typeof candidate === 'function'
+                ? candidate
+                : null;
     }
     catch {
         ProxyAgent = null;
     }
     return ProxyAgent;
+};
+const hasExplicitPort = (rawUrl) => {
+    try {
+        const url = new URL(rawUrl);
+        if (url.port.length > 0)
+            return true;
+        return (rawUrl.match(/:(\d+)(?:\/|$)/)?.[1]?.length ?? 0) > 0;
+    }
+    catch {
+        return false;
+    }
+};
+const shouldUseReverseProxy = (proxy) => {
+    if (!proxy)
+        return false;
+    if (proxy.type === 'reverse')
+        return true;
+    return (proxy.type === undefined &&
+        !!proxy.url &&
+        !proxy.username &&
+        !proxy.password &&
+        !hasExplicitPort(proxy.url));
 };
 /**
  * Numeric ordering for log levels.
@@ -1240,15 +1268,15 @@ async function http1makeRequest(urlString, options = {}) {
     while (true) {
         try {
             let finalUrl = urlString;
-            if (proxy?.type === 'reverse' ||
-                (proxy?.url && !proxy.username && !proxy.url.includes(':', 7))) {
+            const useReverseProxy = shouldUseReverseProxy(proxy);
+            if (useReverseProxy && proxy?.url) {
                 finalUrl = `${proxy.url.replace(/\/+$/, '')}/${urlString}`;
                 logger('debug', 'Network', `Using reverse proxy: ${proxy.url} for ${urlString}`);
             }
             const url = new URL(finalUrl);
             const isHttps = url.protocol === 'https:';
             let agent = options.agent;
-            if (!agent && proxy?.url && !finalUrl.startsWith(proxy.url)) {
+            if (!agent && proxy?.url && !useReverseProxy) {
                 if (proxy?.url) {
                     const proxyAgent = await getProxyAgent();
                     if (proxyAgent) {

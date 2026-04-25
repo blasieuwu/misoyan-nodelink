@@ -67,6 +67,7 @@ if (isMainThread) {
         }
     }
     const config = await loadConfig();
+    utils.applyEnvOverrides(config);
     const specConfig = 
     // biome-ignore lint/complexity/useLiteralKeys: TypeScript requires index signature access
     config['cluster']?.[

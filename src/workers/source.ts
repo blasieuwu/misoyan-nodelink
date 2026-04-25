@@ -108,6 +108,7 @@ if (isMainThread) {
   }
 
   const config = await loadConfig()
+  utils.applyEnvOverrides(config)
   const specConfig: SourceWorkerConfig =
     // biome-ignore lint/complexity/useLiteralKeys: TypeScript requires index signature access
     (config['cluster'] as Record<string, SourceWorkerConfig> | undefined)?.[

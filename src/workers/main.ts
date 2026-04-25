@@ -47,7 +47,7 @@ import type {
   WorkerNodeLink,
   WorkerPlayer
 } from '../typings/workers/worker.types.ts'
-import { cleanupHttpAgents, initLogger, logger } from '../utils.ts'
+import { applyEnvOverrides, cleanupHttpAgents, initLogger, logger } from '../utils.ts'
 import { createVoiceRelay } from '../voice/voiceRelay.ts'
 import {
   createHeadQueue,
@@ -108,6 +108,7 @@ try {
   config = (await import(resolveRootConfigUrl('config.default.js')))
     .default as unknown as NodeLinkConfig
 }
+applyEnvOverrides(config as unknown as Record<string, unknown>)
 
 const HIBERNATION_ENABLED = config.cluster?.hibernation?.enabled !== false
 

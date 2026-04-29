@@ -19,7 +19,7 @@ import type {
   TrackUrlResult,
   WorkerNodeLink
 } from '../typings/sources/source.types.ts'
-import { encodeTrack, logger, makeRequest } from '../utils.ts'
+import { encodeTrack, http1makeRequest, logger } from '../utils.ts'
 
 /**
  * NodeLink audio source provider for Monochrome (Tidal proxy).
@@ -64,14 +64,16 @@ class MonochromeSource implements SourceInstance {
       }
 
     const defaultUrls = [
-      'https://singapore-1.monochrome.tf',
-      'https://ohio-1.monochrome.tf',
-      'https://frankfurt-1.monochrome.tf',
-      'https://hifi.geeked.wtf',
+      'https://tidal-api.binimum.org',
       'https://eu-central.monochrome.tf',
       'https://us-west.monochrome.tf',
-      'https://api.monochrome.tf',
-      'http://wolf.qqdl.site'
+      'https://triton.squid.wtf',
+      'https://hifi.geeked.wtf',
+      'https://wolf.qqdl.site',
+      'https://vogel.qqdl.site',
+      'https://katze.qqdl.site',
+      'https://hund.qqdl.site',
+      'https://api.monochrome.tf'
     ]
 
     const initPool = (urls: string[]) =>
@@ -106,64 +108,98 @@ class MonochromeSource implements SourceInstance {
    * @returns A promise resolving to true if initialized.
    */
   public async setup(): Promise<boolean> {
-    const apiCount = this.apiInstances.length
-    const streamCount = this.streamingInstances.length
+    try {
+      const apiCount = this.apiInstances.length
+      const streamCount = this.streamingInstances.length
 
-    if (apiCount === 0) {
+      if (apiCount === 0) {
+        logger(
+          'warn',
+          'Monochrome',
+          'Source failed to initialize: No instances available.'
+        )
+        return false
+      }
+
       logger(
-        'warn',
+        'info',
         'Monochrome',
-        'Source failed to initialize: No instances available.'
+        `Initializing latency check for ${apiCount} instances...`
+      )
+
+      const checkInstance = async (instance: InstanceHealth) => {
+        const start = Date.now()
+        try {
+          const { statusCode } = await http1makeRequest(`${instance.url}/`, {
+            method: 'GET',
+            timeout: 3000
+          })
+          const latency = Date.now() - start
+
+          if (statusCode === 200 || statusCode === 404 || statusCode === 302) {
+            // Success (or at least reachable)
+            if (latency < 500) instance.score = 100
+            else if (latency < 1500) instance.score = 80
+            else if (latency < 3000) instance.score = 50
+            else instance.score = 20
+
+            logger(
+              'debug',
+              'Monochrome',
+              `Instance ${instance.url} - Latency: ${latency}ms, Initial Score: ${instance.score}`
+            )
+          } else {
+            instance.score = 0
+            instance.lastFailure = Date.now()
+            logger(
+              'debug',
+              'Monochrome',
+              `Instance ${instance.url} - Error: Status ${statusCode}, Score: 0`
+            )
+          }
+        } catch (_e) {
+          instance.score = 0
+          instance.lastFailure = Date.now()
+          logger(
+            'debug',
+            'Monochrome',
+            `Instance ${instance.url} - Connection Failed, Score: 0`
+          )
+        }
+      }
+
+      await Promise.allSettled(this.apiInstances.map(checkInstance))
+
+      // Sync streaming scores if they use the same URLs
+      for (const s of this.streamingInstances) {
+        const api = this.apiInstances.find((a) => a.url === s.url)
+        if (api) s.score = api.score
+      }
+
+      const reachable = this.apiInstances.filter((i) => i.score > 0).length
+      logger(
+        'info',
+        'Monochrome',
+        `Source is ready with ${apiCount} API (${reachable} reachable) and ${streamCount} streaming instances.`
+      )
+
+      if (reachable === 0) {
+        logger(
+          'warn',
+          'Monochrome',
+          'No reachable Monochrome instances at startup. Source will stay loaded but degraded.'
+        )
+      }
+
+      return true
+    } catch (error) {
+      logger(
+        'error',
+        'Monochrome',
+        `Setup failed without crashing the worker: ${error instanceof Error ? error.message : String(error)}`
       )
       return false
     }
-
-    logger('info', 'Monochrome', `Initializing latency check for ${apiCount} instances...`)
-    
-    const checkInstance = async (instance: InstanceHealth) => {
-      const start = Date.now()
-      try {
-        const { statusCode } = await makeRequest(instance.url + '/', {
-          method: 'GET',
-          timeout: 3000
-        })
-        const latency = Date.now() - start
-        
-        if (statusCode === 200 || statusCode === 404 || statusCode === 302) {
-          // Success (or at least reachable)
-          if (latency < 500) instance.score = 100
-          else if (latency < 1500) instance.score = 80
-          else if (latency < 3000) instance.score = 50
-          else instance.score = 20
-          
-          logger('debug', 'Monochrome', `Instance ${instance.url} - Latency: ${latency}ms, Initial Score: ${instance.score}`)
-        } else {
-          instance.score = 0
-          instance.lastFailure = Date.now()
-          logger('debug', 'Monochrome', `Instance ${instance.url} - Error: Status ${statusCode}, Score: 0`)
-        }
-      } catch (e) {
-        instance.score = 0
-        instance.lastFailure = Date.now()
-        logger('debug', 'Monochrome', `Instance ${instance.url} - Connection Failed, Score: 0`)
-      }
-    }
-
-    await Promise.allSettled(this.apiInstances.map(checkInstance))
-    
-    // Sync streaming scores if they use the same URLs
-    for (const s of this.streamingInstances) {
-      const api = this.apiInstances.find(a => a.url === s.url)
-      if (api) s.score = api.score
-    }
-
-    const reachable = this.apiInstances.filter(i => i.score > 0).length
-    logger(
-      'info',
-      'Monochrome',
-      `Source is ready with ${apiCount} API (${reachable} reachable) and ${streamCount} streaming instances.`
-    )
-    return true
   }
 
   /**
@@ -232,7 +268,7 @@ class MonochromeSource implements SourceInstance {
 
       instance.activeRequests++
       try {
-        const { body, error, statusCode } = await makeRequest(url, {
+        const { body, error, statusCode } = await http1makeRequest(url, {
           timeout: 5000,
           headers: {
             'User-Agent':
@@ -593,9 +629,7 @@ class MonochromeSource implements SourceInstance {
         expectedDuration: decodedTrack.length,
         headers: {
           'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
-          Referer: 'https://monochrome.tf/',
-          Origin: 'https://monochrome.tf'
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
       })
 
@@ -687,7 +721,7 @@ class MonochromeSource implements SourceInstance {
       'Monochrome',
       `Loading progressive stream for ${decodedTrack.identifier}`
     )
-    const res = await makeRequest(url, {
+    const res = await http1makeRequest(url, {
       method: 'GET',
       streamOnly: true,
       headers: {

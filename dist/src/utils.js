@@ -11,6 +11,7 @@ import util from 'node:util';
 import zlib from 'node:zlib';
 import packageJson from '../package.json' with { type: 'json' };
 import { DEFAULT_MAX_REDIRECTS, DISCORD_ID_REGEX, REDIRECT_STATUS_CODES, SEMVER_PATTERN } from "./constants.js";
+const isBun = typeof process !== "undefined" && process.versions?.bun;
 /**
  * Reference to the runtime NodeLink instance stored on the global object.
  *
@@ -36,12 +37,40 @@ const getProxyAgent = async () => {
     proxyAgentInitAttempted = true;
     try {
         const mod = await import('proxy-agent');
-        ProxyAgent = (mod.ProxyAgent || mod.default);
+        const candidate = mod.ProxyAgent ||
+            mod.default?.ProxyAgent ||
+            mod.default;
+        ProxyAgent =
+            typeof candidate === 'function'
+                ? candidate
+                : null;
     }
     catch {
         ProxyAgent = null;
     }
     return ProxyAgent;
+};
+const hasExplicitPort = (rawUrl) => {
+    try {
+        const url = new URL(rawUrl);
+        if (url.port.length > 0)
+            return true;
+        return (rawUrl.match(/:(\d+)(?:\/|$)/)?.[1]?.length ?? 0) > 0;
+    }
+    catch {
+        return false;
+    }
+};
+const shouldUseReverseProxy = (proxy) => {
+    if (!proxy)
+        return false;
+    if (proxy.type === 'reverse')
+        return true;
+    return (proxy.type === undefined &&
+        !!proxy.url &&
+        !proxy.username &&
+        !proxy.password &&
+        !hasExplicitPort(proxy.url));
 };
 /**
  * Numeric ordering for log levels.
@@ -1239,15 +1268,15 @@ async function http1makeRequest(urlString, options = {}) {
     while (true) {
         try {
             let finalUrl = urlString;
-            if (proxy?.type === 'reverse' ||
-                (proxy?.url && !proxy.username && !proxy.url.includes(':', 7))) {
+            const useReverseProxy = shouldUseReverseProxy(proxy);
+            if (useReverseProxy && proxy?.url) {
                 finalUrl = `${proxy.url.replace(/\/+$/, '')}/${urlString}`;
                 logger('debug', 'Network', `Using reverse proxy: ${proxy.url} for ${urlString}`);
             }
             const url = new URL(finalUrl);
             const isHttps = url.protocol === 'https:';
             let agent = options.agent;
-            if (!agent && proxy?.url && !finalUrl.startsWith(proxy.url)) {
+            if (!agent && proxy?.url && !useReverseProxy) {
                 if (proxy?.url) {
                     const proxyAgent = await getProxyAgent();
                     if (proxyAgent) {
@@ -1331,6 +1360,13 @@ async function makeRequest(urlString, options, nodelink) {
     }
     if (_redirectsFollowed >= maxRedirects) {
         return Promise.reject(new Error(`Too many redirects (${maxRedirects}) for ${urlString}`));
+    }
+    // fall back to HTTP/1 for Bun requests
+    // Note: bun v1.3.12, crashes with "authority" argument must be a type of string, object or URL. received type Number (825110816)
+    // Crashes the source worker ^^, could be related to monochrome's request or anything else that uses http/2
+    // UPDATE: Bun v1.3.13 has fixed this crash, since it was released today as this commit, i will be checking the version but can be removed later.
+    if (isBun && process.versions.bun.localeCompare('1.3.13', undefined, { numeric: true }) < 0) {
+        return http1makeRequest(urlString, options);
     }
     if (options.proxy) {
         return http1makeRequest(urlString, options);
@@ -1824,4 +1860,64 @@ function cleanupLogger() {
         logStream = null;
     }
 }
-export { applyEnvOverrides, checkForUpdates, cleanupHttpAgents, cleanupLogger, decodeTrack, encodeTrack, generateRandomLetters, getBestMatch, getGitInfo, getStats, getVersion, http1makeRequest, initLogger, logger, makeRequest, parseClient, parseSemver, sendErrorResponse, sendResponse, validateProperty, verifyDiscordID, verifyMethod };
+/**
+ * Fetches SponsorBlock segments for a YouTube video with privacy prefixing.
+ *
+ * Calculates the SHA256 prefix and queries the public SponsorBlock API,
+ * then filters results for the exact video ID and maps them to the
+ * local segment interface with milliseconds timestamps.
+ *
+ * @param videoId - Target YouTube video identifier.
+ * @param categories - Array of categories to retrieve.
+ * @param actionTypes - Array of action types to retrieve.
+ * @param apiBase - Optional API base URL override.
+ * @param proxy - Optional proxy for the request.
+ * @returns Promise resolving to the list of segments found.
+ * @public
+ */
+async function fetchSponsorBlockSegments(videoId, categories, actionTypes, apiBase = 'https://sponsor.ajay.app', proxy) {
+    const hash = crypto.createHash('sha256').update(videoId).digest('hex');
+    const prefix = hash.substring(0, 4);
+    const params = new URLSearchParams();
+    for (const cat of categories)
+        params.append('category', cat);
+    for (const action of actionTypes)
+        params.append('actionType', action);
+    const url = `${apiBase.replace(/\/+$/, '')}/api/skipSegments/${prefix}?${params.toString()}`;
+    logger('debug', 'SponsorBlock', `Fetching segments for video ${videoId} (prefix: ${prefix}) from ${url}`);
+    try {
+        const startTime = Date.now();
+        const result = await makeRequest(url, { method: 'GET', proxy });
+        const duration = Date.now() - startTime;
+        if (result.statusCode !== 200) {
+            logger('warn', 'SponsorBlock', `API returned status ${result.statusCode} for video ${videoId} after ${duration}ms`);
+            return [];
+        }
+        if (!Array.isArray(result.body)) {
+            logger('debug', 'SponsorBlock', `No segments found for prefix ${prefix} (Status: ${result.statusCode}, Duration: ${duration}ms)`);
+            return [];
+        }
+        const videoMatch = result.body.find((entry) => entry.videoID === videoId);
+        if (!videoMatch?.segments) {
+            logger('debug', 'SponsorBlock', `No exact match for video ${videoId} in prefix results (Results: ${result.body.length}, Duration: ${duration}ms)`);
+            return [];
+        }
+        logger('debug', 'SponsorBlock', `Successfully loaded ${videoMatch.segments.length} segments for video ${videoId} in ${duration}ms`);
+        return videoMatch.segments.map((s) => ({
+            uuid: s.UUID,
+            start: Math.round(s.segment[0] * 1000),
+            end: Math.round(s.segment[1] * 1000),
+            category: s.category,
+            actionType: s.actionType,
+            votes: s.votes,
+            locked: s.locked === 1,
+            videoDuration: Math.round(s.videoDuration * 1000),
+            description: s.description || ''
+        }));
+    }
+    catch (error) {
+        logger('warn', 'SponsorBlock', `Failed to fetch segments for video ${videoId}:`, error);
+        return [];
+    }
+}
+export { applyEnvOverrides, checkForUpdates, cleanupHttpAgents, cleanupLogger, decodeTrack, encodeTrack, fetchSponsorBlockSegments, generateRandomLetters, getBestMatch, getGitInfo, getStats, getVersion, http1makeRequest, initLogger, logger, makeRequest, parseClient, parseSemver, sendErrorResponse, sendResponse, validateProperty, verifyDiscordID, verifyMethod };

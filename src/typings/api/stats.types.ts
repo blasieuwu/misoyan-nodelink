@@ -162,6 +162,14 @@ export interface WorkerStatsPayload {
   }
   /** Event loop lag in milliseconds. */
   eventLoopLag?: number
+  /** Event loop lag p50 in milliseconds. */
+  eventLoopLagP50?: number
+  /** Event loop lag p95 in milliseconds. */
+  eventLoopLagP95?: number
+  /** Event loop lag p99 in milliseconds. */
+  eventLoopLagP99?: number
+  /** Recent stuck recovery count in the last interval. */
+  stuckRecoveries?: number
   /** Audio frame stats for the worker. */
   frameStats?: FrameStats
 }

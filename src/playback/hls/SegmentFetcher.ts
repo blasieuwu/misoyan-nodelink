@@ -134,7 +134,7 @@ export default class SegmentFetcher {
     mapInfo: HLSSegmentMap | null,
     keyInfo: HLSSegmentKey | null = null
   ): Promise<Buffer | null> {
-    if (!mapInfo || !mapInfo.uri) return null
+    if (!mapInfo?.uri) return null
 
     const { body, error, statusCode } = await http1makeRequest(mapInfo.uri, {
       headers: this.headers,

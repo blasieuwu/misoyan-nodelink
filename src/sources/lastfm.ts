@@ -400,7 +400,7 @@ export default class LastFMSource {
           ]
         : null
 
-      if (!bestMatch || !bestMatch.info) {
+      if (!bestMatch?.info) {
         return {
           exception: {
             message: 'No suitable alternative found after filtering.',

@@ -425,27 +425,58 @@ export default class HttpSource {
   }
 
   /**
+   * Decodes a 4-byte synchsafe integer from an ID3v2 header.
+   * @param bytes - Bytes 6..9 from the ID3 header.
+   * @returns Parsed ID3 payload size.
+   * @internal
+   */
+  private _readSynchsafeInt(bytes: Buffer): number {
+    return (
+      ((bytes[0] || 0) << 21) |
+      ((bytes[1] || 0) << 14) |
+      ((bytes[2] || 0) << 7) |
+      (bytes[3] || 0)
+    )
+  }
+
+  /**
    * Loads stream for HTTP track.
    * @param _decodedTrack - Decoded track payload (unused).
    * @param url - Stream URL.
    * @returns Stream payload or exception.
    */
   public async loadStream(
-    _decodedTrack: unknown,
-    url: string
+    decodedTrack: TrackInfo | null | undefined,
+    url: string,
+    _protocol?: string,
+    additionalData?: Record<string, unknown>
   ): Promise<TrackStreamResult | SourceResult> {
     try {
+      const guildId = String(additionalData?.guildId || 'unbound')
+      const trackId = String(decodedTrack?.identifier || url)
+      const trackTitle = String(decodedTrack?.title || '-').replace(/"/g, "'")
+      const streamContext = `guildId=${guildId} trackId=${trackId} title="${trackTitle}"`
       const userAgent = this.config.userAgent || DEFAULT_HTTP_USER_AGENT
-      const opts = {
-        method: 'GET',
-        streamOnly: true,
-        headers: {
-          'Icy-MetaData': '1',
-          'User-Agent': userAgent
-        }
+      const baseHeaders = {
+        'Icy-MetaData': '1',
+        'User-Agent': userAgent
+      }
+      const requestStream = async (
+        streamUrl: string,
+        startByte = 0
+      ): Promise<Awaited<ReturnType<typeof http1makeRequest>>> => {
+        const headers =
+          startByte > 0
+            ? { ...baseHeaders, Range: `bytes=${startByte}-` }
+            : baseHeaders
+        return await http1makeRequest(streamUrl, {
+          method: 'GET',
+          streamOnly: true,
+          headers
+        })
       }
 
-      const response = await http1makeRequest(url, opts)
+      let response = await requestStream(url)
       if (response.error) throw new Error(String(response.error))
 
       const headers = (response.headers || {}) as Record<string, unknown>
@@ -482,23 +513,236 @@ export default class HttpSource {
         })
         ;(httpStream as Readable).pipe(metadataStream)
         outputStream = metadataStream
+
+        const finalStream = outputStream.pipe(new PassThrough())
+
+        finalStream.on('end', () => {
+          logger(
+            'debug',
+            'HTTP Source',
+            `[${streamContext}] stream ended url=${url}, emitting finishBuffering`
+          )
+          finalStream.emit('finishBuffering')
+        })
+
+        finalStream.on('error', (err: Error) => {
+          logger(
+            'error',
+            'HTTP Source',
+            `[${streamContext}] stream error: ${err.message}`
+          )
+        })
+
+        return { stream: finalStream, type: resolvedType }
       }
 
-      const finalStream = outputStream.pipe(new PassThrough())
+      const finalStream = new PassThrough()
+      let activeStreamUrl = response.finalUrl || url
+      let sourceStream: Readable | null = null
+      let totalBytesRead = 0
+      let reconnecting = false
+      let ended = false
+      let reconnectStreak = 0
 
-      finalStream.on('end', () => {
+      const maxId3SkipBytes = 16 * 1024 * 1024
+      let headerParsed = false
+      let bytesToSkip = 0
+      let pendingHeader: Buffer = Buffer.alloc(0)
+      const likelyMp3 =
+        resolvedType.includes('mpeg') ||
+        resolvedType === 'mp3' ||
+        resolvedType.includes('/mp3') ||
+        extractUrlExtension(url) === 'mp3'
+
+      const wait = async (ms: number): Promise<void> => {
+        await new Promise<void>((resolve) => {
+          const timeout = setTimeout(resolve, ms)
+          if (typeof timeout.unref === 'function') timeout.unref()
+        })
+      }
+
+      const finishStream = (): void => {
+        if (ended || finalStream.destroyed || finalStream.writableEnded) return
+        ended = true
         logger(
           'debug',
           'HTTP Source',
-          `Stream ended for ${url}, emitting finishBuffering.`
+          `[${streamContext}] stream ended url=${url}, emitting finishBuffering`
         )
         finalStream.emit('finishBuffering')
-      })
+        finalStream.end()
+      }
 
+      const onData = (chunk: Buffer): void => {
+        totalBytesRead += chunk.length
+        if (reconnectStreak > 0) reconnectStreak = 0
+        let chunkToWrite = chunk
+
+        if (likelyMp3 && !headerParsed) {
+          if (pendingHeader.length > 0) {
+            chunkToWrite = Buffer.concat([pendingHeader, chunk])
+            pendingHeader = Buffer.alloc(0)
+          }
+
+          if (chunkToWrite.length < 10) {
+            pendingHeader = chunkToWrite
+            return
+          }
+
+          if (
+            chunkToWrite[0] === 0x49 &&
+            chunkToWrite[1] === 0x44 &&
+            chunkToWrite[2] === 0x33
+          ) {
+            const tagSize = this._readSynchsafeInt(chunkToWrite.subarray(6, 10))
+            bytesToSkip = Math.min(10 + tagSize, maxId3SkipBytes)
+            logger(
+              'debug',
+              'HTTP Source',
+              `[${streamContext}] skipping initial ID3 tag bytes=${bytesToSkip} url=${url}`
+            )
+          }
+          headerParsed = true
+        }
+
+        if (bytesToSkip > 0) {
+          if (chunkToWrite.length <= bytesToSkip) {
+            bytesToSkip -= chunkToWrite.length
+            return
+          }
+          chunkToWrite = chunkToWrite.subarray(bytesToSkip)
+          bytesToSkip = 0
+        }
+
+        if (chunkToWrite.length === 0) return
+        if (!finalStream.write(chunkToWrite)) sourceStream?.pause()
+      }
+
+      const onEnd = (): void => {
+        if (pendingHeader.length > 0) {
+          finalStream.write(pendingHeader)
+          pendingHeader = Buffer.alloc(0)
+        }
+        finishStream()
+      }
+
+      const onError = (err: Error): void => {
+        const netErr = err as NodeJS.ErrnoException
+        const message = err.message || String(err)
+        const isTransient =
+          netErr.code === 'ECONNRESET' ||
+          netErr.code === 'ECONNABORTED' ||
+          netErr.code === 'ETIMEDOUT' ||
+          /aborted|socket hang up|connection reset|timeout/i.test(message)
+
+        if (isTransient) {
+          void reconnect(message)
+          return
+        }
+
+        logger(
+          'error',
+          'HTTP Source',
+          `[${streamContext}] stream error: ${message}`
+        )
+        finalStream.destroy(err)
+      }
+
+      const onClose = (): void => {
+        if (!ended && !reconnecting) {
+          void reconnect('closed')
+        }
+      }
+
+      const detachSource = (): void => {
+        if (!sourceStream) return
+        sourceStream.removeListener('data', onData)
+        sourceStream.removeListener('end', onEnd)
+        sourceStream.removeListener('error', onError)
+        sourceStream.removeListener('close', onClose)
+      }
+
+      const attachSource = (nextSource: Readable): void => {
+        detachSource()
+        sourceStream = nextSource
+        sourceStream.on('data', onData)
+        sourceStream.on('end', onEnd)
+        sourceStream.on('error', onError)
+        sourceStream.on('close', onClose)
+      }
+
+      const reconnect = async (reason: string): Promise<void> => {
+        if (
+          ended ||
+          reconnecting ||
+          finalStream.destroyed ||
+          finalStream.writableEnded
+        ) {
+          return
+        }
+        reconnecting = true
+
+        while (!ended && !finalStream.destroyed && !finalStream.writableEnded) {
+          reconnectStreak++
+          const delayMs = Math.min(
+            300 * 2 ** Math.min(reconnectStreak - 1, 5),
+            5000
+          )
+          logger(
+            'debug',
+            'HTTP Source',
+            `[${streamContext}] disconnected reason=${reason} retry=${reconnectStreak} offset=${totalBytesRead} delayMs=${delayMs} url=${activeStreamUrl}`
+          )
+          await wait(delayMs)
+          if (ended || finalStream.destroyed || finalStream.writableEnded) break
+
+          response = await requestStream(activeStreamUrl, totalBytesRead)
+          if (response.statusCode === 416) {
+            finishStream()
+            break
+          }
+
+          if (
+            !response.error &&
+            response.stream &&
+            ((response.statusCode || 0) === 200 ||
+              (response.statusCode || 0) === 206)
+          ) {
+            activeStreamUrl = response.finalUrl || activeStreamUrl
+            attachSource(response.stream as Readable)
+            reconnecting = false
+            return
+          }
+
+          logger(
+            'debug',
+            'HTTP Source',
+            `[${streamContext}] reconnect failed url=${activeStreamUrl} statusOrError=${response.error || response.statusCode}`
+          )
+          if (response.statusCode === 403 || response.statusCode === 404) {
+            activeStreamUrl = url
+          }
+        }
+
+        reconnecting = false
+      }
+
+      finalStream.on('drain', () => {
+        if (sourceStream && !sourceStream.destroyed) sourceStream.resume()
+      })
+      finalStream.on('close', () => {
+        detachSource()
+        sourceStream?.destroy?.()
+      })
       finalStream.on('error', (err: Error) => {
-        logger('error', 'HTTP Source', `Stream error: ${err.message}`)
+        logger(
+          'error',
+          'HTTP Source',
+          `[${streamContext}] stream error: ${err.message}`
+        )
       })
 
+      attachSource(httpStream as Readable)
       return { stream: finalStream, type: resolvedType }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)

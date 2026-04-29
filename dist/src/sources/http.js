@@ -342,23 +342,45 @@ export default class HttpSource {
         return { url: info.uri, protocol: 'http' };
     }
     /**
+     * Decodes a 4-byte synchsafe integer from an ID3v2 header.
+     * @param bytes - Bytes 6..9 from the ID3 header.
+     * @returns Parsed ID3 payload size.
+     * @internal
+     */
+    _readSynchsafeInt(bytes) {
+        return (((bytes[0] || 0) << 21) |
+            ((bytes[1] || 0) << 14) |
+            ((bytes[2] || 0) << 7) |
+            (bytes[3] || 0));
+    }
+    /**
      * Loads stream for HTTP track.
      * @param _decodedTrack - Decoded track payload (unused).
      * @param url - Stream URL.
      * @returns Stream payload or exception.
      */
-    async loadStream(_decodedTrack, url) {
+    async loadStream(decodedTrack, url, _protocol, additionalData) {
         try {
+            const guildId = String(additionalData?.guildId || 'unbound');
+            const trackId = String(decodedTrack?.identifier || url);
+            const trackTitle = String(decodedTrack?.title || '-').replace(/"/g, "'");
+            const streamContext = `guildId=${guildId} trackId=${trackId} title="${trackTitle}"`;
             const userAgent = this.config.userAgent || DEFAULT_HTTP_USER_AGENT;
-            const opts = {
-                method: 'GET',
-                streamOnly: true,
-                headers: {
-                    'Icy-MetaData': '1',
-                    'User-Agent': userAgent
-                }
+            const baseHeaders = {
+                'Icy-MetaData': '1',
+                'User-Agent': userAgent
             };
-            const response = await http1makeRequest(url, opts);
+            const requestStream = async (streamUrl, startByte = 0) => {
+                const headers = startByte > 0
+                    ? { ...baseHeaders, Range: `bytes=${startByte}-` }
+                    : baseHeaders;
+                return await http1makeRequest(streamUrl, {
+                    method: 'GET',
+                    streamOnly: true,
+                    headers
+                });
+            };
+            let response = await requestStream(url);
             if (response.error)
                 throw new Error(String(response.error));
             const headers = (response.headers || {});
@@ -390,15 +412,172 @@ export default class HttpSource {
                 });
                 httpStream.pipe(metadataStream);
                 outputStream = metadataStream;
+                const finalStream = outputStream.pipe(new PassThrough());
+                finalStream.on('end', () => {
+                    logger('debug', 'HTTP Source', `[${streamContext}] stream ended url=${url}, emitting finishBuffering`);
+                    finalStream.emit('finishBuffering');
+                });
+                finalStream.on('error', (err) => {
+                    logger('error', 'HTTP Source', `[${streamContext}] stream error: ${err.message}`);
+                });
+                return { stream: finalStream, type: resolvedType };
             }
-            const finalStream = outputStream.pipe(new PassThrough());
-            finalStream.on('end', () => {
-                logger('debug', 'HTTP Source', `Stream ended for ${url}, emitting finishBuffering.`);
+            const finalStream = new PassThrough();
+            let activeStreamUrl = response.finalUrl || url;
+            let sourceStream = null;
+            let totalBytesRead = 0;
+            let reconnecting = false;
+            let ended = false;
+            let reconnectStreak = 0;
+            const maxId3SkipBytes = 16 * 1024 * 1024;
+            let headerParsed = false;
+            let bytesToSkip = 0;
+            let pendingHeader = Buffer.alloc(0);
+            const likelyMp3 = resolvedType.includes('mpeg') ||
+                resolvedType === 'mp3' ||
+                resolvedType.includes('/mp3') ||
+                extractUrlExtension(url) === 'mp3';
+            const wait = async (ms) => {
+                await new Promise((resolve) => {
+                    const timeout = setTimeout(resolve, ms);
+                    if (typeof timeout.unref === 'function')
+                        timeout.unref();
+                });
+            };
+            const finishStream = () => {
+                if (ended || finalStream.destroyed || finalStream.writableEnded)
+                    return;
+                ended = true;
+                logger('debug', 'HTTP Source', `[${streamContext}] stream ended url=${url}, emitting finishBuffering`);
                 finalStream.emit('finishBuffering');
+                finalStream.end();
+            };
+            const onData = (chunk) => {
+                totalBytesRead += chunk.length;
+                if (reconnectStreak > 0)
+                    reconnectStreak = 0;
+                let chunkToWrite = chunk;
+                if (likelyMp3 && !headerParsed) {
+                    if (pendingHeader.length > 0) {
+                        chunkToWrite = Buffer.concat([pendingHeader, chunk]);
+                        pendingHeader = Buffer.alloc(0);
+                    }
+                    if (chunkToWrite.length < 10) {
+                        pendingHeader = chunkToWrite;
+                        return;
+                    }
+                    if (chunkToWrite[0] === 0x49 &&
+                        chunkToWrite[1] === 0x44 &&
+                        chunkToWrite[2] === 0x33) {
+                        const tagSize = this._readSynchsafeInt(chunkToWrite.subarray(6, 10));
+                        bytesToSkip = Math.min(10 + tagSize, maxId3SkipBytes);
+                        logger('debug', 'HTTP Source', `[${streamContext}] skipping initial ID3 tag bytes=${bytesToSkip} url=${url}`);
+                    }
+                    headerParsed = true;
+                }
+                if (bytesToSkip > 0) {
+                    if (chunkToWrite.length <= bytesToSkip) {
+                        bytesToSkip -= chunkToWrite.length;
+                        return;
+                    }
+                    chunkToWrite = chunkToWrite.subarray(bytesToSkip);
+                    bytesToSkip = 0;
+                }
+                if (chunkToWrite.length === 0)
+                    return;
+                if (!finalStream.write(chunkToWrite))
+                    sourceStream?.pause();
+            };
+            const onEnd = () => {
+                if (pendingHeader.length > 0) {
+                    finalStream.write(pendingHeader);
+                    pendingHeader = Buffer.alloc(0);
+                }
+                finishStream();
+            };
+            const onError = (err) => {
+                const netErr = err;
+                const message = err.message || String(err);
+                const isTransient = netErr.code === 'ECONNRESET' ||
+                    netErr.code === 'ECONNABORTED' ||
+                    netErr.code === 'ETIMEDOUT' ||
+                    /aborted|socket hang up|connection reset|timeout/i.test(message);
+                if (isTransient) {
+                    void reconnect(message);
+                    return;
+                }
+                logger('error', 'HTTP Source', `[${streamContext}] stream error: ${message}`);
+                finalStream.destroy(err);
+            };
+            const onClose = () => {
+                if (!ended && !reconnecting) {
+                    void reconnect('closed');
+                }
+            };
+            const detachSource = () => {
+                if (!sourceStream)
+                    return;
+                sourceStream.removeListener('data', onData);
+                sourceStream.removeListener('end', onEnd);
+                sourceStream.removeListener('error', onError);
+                sourceStream.removeListener('close', onClose);
+            };
+            const attachSource = (nextSource) => {
+                detachSource();
+                sourceStream = nextSource;
+                sourceStream.on('data', onData);
+                sourceStream.on('end', onEnd);
+                sourceStream.on('error', onError);
+                sourceStream.on('close', onClose);
+            };
+            const reconnect = async (reason) => {
+                if (ended ||
+                    reconnecting ||
+                    finalStream.destroyed ||
+                    finalStream.writableEnded) {
+                    return;
+                }
+                reconnecting = true;
+                while (!ended && !finalStream.destroyed && !finalStream.writableEnded) {
+                    reconnectStreak++;
+                    const delayMs = Math.min(300 * 2 ** Math.min(reconnectStreak - 1, 5), 5000);
+                    logger('debug', 'HTTP Source', `[${streamContext}] disconnected reason=${reason} retry=${reconnectStreak} offset=${totalBytesRead} delayMs=${delayMs} url=${activeStreamUrl}`);
+                    await wait(delayMs);
+                    if (ended || finalStream.destroyed || finalStream.writableEnded)
+                        break;
+                    response = await requestStream(activeStreamUrl, totalBytesRead);
+                    if (response.statusCode === 416) {
+                        finishStream();
+                        break;
+                    }
+                    if (!response.error &&
+                        response.stream &&
+                        ((response.statusCode || 0) === 200 ||
+                            (response.statusCode || 0) === 206)) {
+                        activeStreamUrl = response.finalUrl || activeStreamUrl;
+                        attachSource(response.stream);
+                        reconnecting = false;
+                        return;
+                    }
+                    logger('debug', 'HTTP Source', `[${streamContext}] reconnect failed url=${activeStreamUrl} statusOrError=${response.error || response.statusCode}`);
+                    if (response.statusCode === 403 || response.statusCode === 404) {
+                        activeStreamUrl = url;
+                    }
+                }
+                reconnecting = false;
+            };
+            finalStream.on('drain', () => {
+                if (sourceStream && !sourceStream.destroyed)
+                    sourceStream.resume();
+            });
+            finalStream.on('close', () => {
+                detachSource();
+                sourceStream?.destroy?.();
             });
             finalStream.on('error', (err) => {
-                logger('error', 'HTTP Source', `Stream error: ${err.message}`);
+                logger('error', 'HTTP Source', `[${streamContext}] stream error: ${err.message}`);
             });
+            attachSource(httpStream);
             return { stream: finalStream, type: resolvedType };
         }
         catch (err) {

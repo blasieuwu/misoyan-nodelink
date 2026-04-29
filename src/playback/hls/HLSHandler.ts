@@ -258,10 +258,7 @@ export default class HLSHandler extends PassThrough {
       `Selected variant bandwidth: ${bestVariant.bandwidth}, codecs: ${bestVariant.codecs}`
     )
 
-    if (
-      bestVariant.audio &&
-      parsed.audioGroups?.[bestVariant.audio]
-    ) {
+    if (bestVariant.audio && parsed.audioGroups?.[bestVariant.audio]) {
       const group = parsed.audioGroups[bestVariant.audio] as Array<{
         default?: string
         autoselect?: string

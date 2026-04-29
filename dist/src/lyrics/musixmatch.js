@@ -666,7 +666,7 @@ export default class MusixmatchLyrics {
                 return result;
             }
             const formatted = this._format(found.lyrics, found.subtitles, found.track);
-            if (!formatted || !formatted.lines.length) {
+            if (!formatted?.lines.length) {
                 const result = { loadType: 'empty', data: {} };
                 this._setCache(cacheKey, result);
                 return result;

@@ -249,6 +249,27 @@ export interface FadeTimers {
     | null
 }
 
+export interface SponsorBlockSegment {
+  uuid: string
+  start: number
+  end: number
+  category: string
+  actionType: string
+  votes: number
+  locked: boolean
+  videoDuration: number
+  description: string
+}
+
+export interface PlayerSponsorBlockState {
+  enabled: boolean
+  categories: string[]
+  actionTypes: string[]
+  segments: SponsorBlockSegment[]
+  lastSkippedUuid: string | null
+  skipMarginMs: number
+}
+
 /**
  * NodeLink runtime options relevant to playback.
  */
@@ -260,6 +281,13 @@ export interface NodeLinkOptions {
   enableHoloTracks?: boolean
   fetchChannelInfo?: boolean
   resolveExternalLinks?: boolean
+  sponsorblock?: {
+    enabled?: boolean
+    api?: string
+    categories?: string[]
+    actionTypes?: string[]
+    skipMarginMs?: number
+  }
   audio?: {
     encryption?: string | null
     fading?: FadingConfig
@@ -370,6 +398,7 @@ export interface NodeLink {
   extensions?: {
     audioInterceptors?: Array<() => import('node:stream').Transform>
   } & Record<string, unknown>
+  pluginManager?: import('../../managers/pluginManager.ts').default | null
   getLyricsManager?: () => Promise<LyricsManagerLike>
   [key: string]: unknown
 }

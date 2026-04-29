@@ -785,6 +785,9 @@ export interface VoiceConnection {
  * @public
  */
 export interface SessionSocket {
+  /** Optional guild association used by websocket hooks. */
+  guildId?: string
+
   /**
    * Sends data through the socket
    */

@@ -71,8 +71,22 @@ export type HttpRequestHeaders = Record<string, string | number | string[]> & {
 }
 
 /**
+ * SponsorBlock segment metadata returned by the API.
+ */
+export interface SponsorBlockSegment {
+  uuid: string
+  start: number
+  end: number
+  category: string
+  actionType: string
+  votes: number
+  locked: boolean
+  videoDuration: number
+  description: string
+}
+
+/**
  * Options for HTTP requests executed by NodeLink utilities.
- *
  * Includes retry, redirect, proxy, and compression settings.
  * @public
  */

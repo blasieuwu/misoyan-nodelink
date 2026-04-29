@@ -47,7 +47,7 @@ import type {
   WorkerNodeLink,
   WorkerPlayer
 } from '../typings/workers/worker.types.ts'
-import { cleanupHttpAgents, initLogger, logger } from '../utils.ts'
+import { applyEnvOverrides, cleanupHttpAgents, initLogger, logger } from '../utils.ts'
 import { createVoiceRelay } from '../voice/voiceRelay.ts'
 import {
   createHeadQueue,
@@ -108,6 +108,7 @@ try {
   config = (await import(resolveRootConfigUrl('config.default.js')))
     .default as unknown as NodeLinkConfig
 }
+applyEnvOverrides(config as unknown as Record<string, unknown>)
 
 const HIBERNATION_ENABLED = config.cluster?.hibernation?.enabled !== false
 
@@ -1689,6 +1690,20 @@ function startTimers(hibernating = false): void {
 
       const mem = process.memoryUsage()
       const workerIdEnv = NODE_UNIQUE_ID
+      const eluP50 = hndl.percentile(50) / 1e6
+      const eluP95 = hndl.percentile(95) / 1e6
+      const eluP99 = hndl.percentile(99) / 1e6
+
+      let totalStuckRecoveries = 0
+      for (const player of players.values()) {
+        const count = (player as { stuckRecoveryCount?: number })
+          .stuckRecoveryCount
+        if (typeof count === 'number') {
+          totalStuckRecoveries += count
+          player.stuckRecoveryCount = 0
+        }
+      }
+
       const stats = {
         workerId: parseInt(workerIdEnv ?? '0', 10) + 1,
         isHibernating,
@@ -1699,12 +1714,15 @@ function startTimers(hibernating = false): void {
           0
         ),
         cpu: { nodelinkLoad },
-        eventLoopLag: hndl.mean / 1e6,
+        eventLoopLag: eluP50,
+        eventLoopLagP95: eluP95,
+        eventLoopLagP99: eluP99,
         memory: {
           used: mem.heapUsed,
           allocated: mem.heapTotal
         },
-        frameStats: localFrameStats
+        frameStats: localFrameStats,
+        stuckRecoveries: totalStuckRecoveries
       }
 
       if (eventSocket && !eventSocket.destroyed) {
@@ -1740,7 +1758,7 @@ async function initialize() {
   await nodelink.credentialManager.load()
   await nodelink.sources.loadFolder()
   await nodelink.statsManager.initialize()
-  await nodelink.pluginManager.load('worker')
+  await nodelink.pluginManager.load('voice-worker')
 
   lastActivityTime = Date.now()
 
@@ -1828,7 +1846,8 @@ async function startLoadStream(
 
   const additionalData = {
     ...(urlResult.additionalData || {}),
-    startTime: payload?.position || 0
+    startTime: payload?.position || 0,
+    position: payload?.position || 0
   }
 
   const fetched = (await nodelink.sources.getTrackStream(
@@ -2370,6 +2389,8 @@ function enqueueCommand(
 }
 
 process.on('message', (msg: unknown) => {
+  nodelink.pluginManager?.callHook('onIPCMessage', msg)
+
   if (!msg || typeof msg !== 'object') return
 
   const message = msg as {

@@ -24,7 +24,7 @@ import {
 } from './utils.ts'
 import 'dotenv/config'
 import type { ServerWebSocket } from 'bun'
-import { GatewayEvents } from './constants.ts'
+import { GatewayEvents, MINIMUM_NODE_VERSION } from './constants.ts'
 import ConfigValidationManager from './managers/configValidationManager.ts'
 import type ConnectionManager from './managers/connectionManager.ts'
 import type CredentialManager from './managers/credentialManager.ts'
@@ -71,6 +71,97 @@ type RequestHandlerType = typeof import('./api/index.ts').default
 let requestHandlerPromise: Promise<RequestHandlerType> | null = null
 type ProfilerApiModule = typeof import('./api/profiler.ts')
 let profilerApiPromise: Promise<ProfilerApiModule> | null = null
+
+const isRuntimeAtLeast = (current: string, minimum: string): boolean =>
+  current.replace(/^v/, '').localeCompare(minimum.replace(/^v/, ''), undefined, {
+    numeric: true
+  }) >= 0
+
+type NodeLtsCacheEntry = {
+  version: string
+  fetchedAt: number
+}
+
+const NODE_LTS_CREDENTIAL_KEY = 'runtime.node.latestLts'
+const NODE_LTS_CREDENTIAL_TTL_MS = 24 * 60 * 60 * 1000
+const NODE_LTS_MEMORY_TTL_MS = 10 * 60 * 1000
+let latestNodeLtsCache: { value: string | null; expiresAt: number } | null = null
+
+const getLatestNodeLtsVersion = async (
+  credentialManager: CredentialManager | null
+): Promise<string | null> => {
+  const now = Date.now()
+  if (latestNodeLtsCache && latestNodeLtsCache.expiresAt > now) {
+    return latestNodeLtsCache.value
+  }
+
+  const diskCache = credentialManager?.get<NodeLtsCacheEntry>(
+    NODE_LTS_CREDENTIAL_KEY
+  )
+  if (
+    diskCache &&
+    typeof diskCache.version === 'string' &&
+    diskCache.version.length > 0
+  ) {
+    latestNodeLtsCache = {
+      value: diskCache.version,
+      expiresAt: now + NODE_LTS_MEMORY_TTL_MS
+    }
+    return diskCache.version
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 2000)
+
+  try {
+    const response = await fetch('https://nodejs.org/dist/index.json', {
+      signal: controller.signal
+    })
+    if (!response.ok) {
+      latestNodeLtsCache = { value: null, expiresAt: now + 10 * 60 * 1000 }
+      return null
+    }
+
+    const releases = (await response.json()) as Array<{
+      version?: string
+      lts?: string | boolean
+    }>
+    const latestLts = releases.find(
+      (release) =>
+        typeof release.version === 'string' &&
+        release.version.length > 0 &&
+        Boolean(release.lts)
+    )
+
+    latestNodeLtsCache = {
+      value: latestLts?.version ?? null,
+      expiresAt: now + 60 * 60 * 1000
+    }
+
+    if (latestNodeLtsCache.value && credentialManager) {
+      credentialManager.set(
+        NODE_LTS_CREDENTIAL_KEY,
+        {
+          version: latestNodeLtsCache.value,
+          fetchedAt: now
+        } satisfies NodeLtsCacheEntry,
+        NODE_LTS_CREDENTIAL_TTL_MS
+      )
+    }
+
+    return latestNodeLtsCache.value
+  } catch (error) {
+    logger(
+      'warn',
+      'Server',
+      `Failed to fetch latest Node.js LTS version: ${error instanceof Error ? error.message : String(error)}`
+    )
+    latestNodeLtsCache = { value: null, expiresAt: now + 10 * 60 * 1000 }
+    return null
+  } finally {
+    clearTimeout(timeout)
+  }
+}
 
 const getRequestHandler = async (): Promise<RequestHandlerType> => {
   if (!requestHandlerPromise) {
@@ -722,6 +813,13 @@ class NodelinkServer extends EventEmitter {
         clientInfo: ClientInfo,
         oldSessionId: string
       ) => {
+        this.pluginManager?.callHook(
+          'onWebSocketConnect',
+          socket,
+          clientInfo,
+          oldSessionId
+        )
+
         const originalOn = socket.on.bind(socket)
         socket.on = (
           event: string,
@@ -732,19 +830,20 @@ class NodelinkServer extends EventEmitter {
               event,
               async (...args: (string | number | Buffer)[]) => {
                 const data = args[0]
+
+                let parsedData: ParsedWebSocketData
+                try {
+                  const dataStr =
+                    typeof data === 'string'
+                      ? data
+                      : (data as Buffer).toString()
+                  parsedData = JSON.parse(dataStr)
+                } catch {
+                  parsedData = data as string | Buffer
+                }
+
                 const interceptors = this.extensions?.wsInterceptors
                 if (interceptors && Array.isArray(interceptors)) {
-                  let parsedData: ParsedWebSocketData
-                  try {
-                    const dataStr =
-                      typeof data === 'string'
-                        ? data
-                        : (data as Buffer).toString()
-                    parsedData = JSON.parse(dataStr)
-                  } catch {
-                    parsedData = data as string | Buffer
-                  }
-
                   for (const interceptor of interceptors) {
                     const handled = await interceptor(
                       this as INodelinkServer,
@@ -755,10 +854,35 @@ class NodelinkServer extends EventEmitter {
                     if (handled === true) return
                   }
                 }
+
+                this.pluginManager?.callHook(
+                  'onWebSocketMessage',
+                  socket,
+                  parsedData,
+                  socket.guildId
+                )
+
                 listener(...args)
               }
             )
           }
+
+          if (event === 'close') {
+            return originalOn(
+              event,
+              (...args: (string | number | Buffer)[]) => {
+                this.pluginManager?.callHook(
+                  'onWebSocketClose',
+                  socket,
+                  args[0], // code
+                  args[1] // reason
+                )
+
+                listener(...args)
+              }
+            )
+          }
+
           return originalOn(event, listener)
         }
 
@@ -1450,6 +1574,10 @@ class NodelinkServer extends EventEmitter {
 
     this.server = http.createServer(
       (req: http.IncomingMessage, res: http.ServerResponse) => {
+        this.pluginManager?.callHook('onRESTRequest', req, res)
+
+        if (res.writableEnded) return
+
         void getRequestHandler()
           .then((handler) =>
             handler(
@@ -1814,6 +1942,8 @@ class NodelinkServer extends EventEmitter {
         _sessionId: string,
         guildId: string
       ) => {
+        socket.guildId = guildId
+
         if (!this.options.voiceReceive?.enabled) {
           try {
             socket.close(1008, 'Voice receive disabled')
@@ -1841,6 +1971,7 @@ class NodelinkServer extends EventEmitter {
         id: string
       ) => {
         let videoId = id
+        socket.guildId = id // Tag it with videoId or guildId equivalent
 
         if (/^\d{17,20}$/.test(id)) {
           const player = this.sessions.getPlayer(id)
@@ -2171,10 +2302,17 @@ class NodelinkServer extends EventEmitter {
    * @public
    */
   handleIPCMessage(msg: IPCMessage): void {
+    this.pluginManager?.callHook('onIPCMessage', msg)
+
     if (msg.type === 'playerEvent') {
       const { sessionId, data } = msg.payload
       const session = this.sessions.get(sessionId)
-      session?.socket?.send(data)
+      // [feat] session-resuming-queue: queue events when session is paused with resuming enabled
+      if (session?.isPaused && session.resuming) {
+        session.eventQueue.push(data)
+      } else {
+        session?.socket?.send(data)
+      }
     } else if (msg.type === 'workerStats') {
       if (this.workerManager) {
         const worker = this.workerManager.workers.find(
@@ -2240,6 +2378,50 @@ class NodelinkServer extends EventEmitter {
   async start(
     startOptions: { isClusterPrimary?: boolean; isClusterWorker?: boolean } = {}
   ): Promise<NodelinkServer> {
+    const runningNonLts = !process.release?.lts
+    const unsupportedRuntime = !isRuntimeAtLeast(
+      process.version,
+      MINIMUM_NODE_VERSION
+    )
+    let latestLts: string | null = null
+
+    await this._ensurePersistenceManagers()
+    await this.credentialManager?.load()
+    latestLts = await getLatestNodeLtsVersion(this.credentialManager)
+
+    if (unsupportedRuntime) {
+      throw new Error(
+        `Unsupported Node.js runtime (${process.version}). This version is below the stable baseline (v${MINIMUM_NODE_VERSION}), so functionality is not guaranteed. Latest LTS: ${latestLts ?? 'unavailable'}. If errors occur, update Node.js to LTS.`
+      )
+    }
+
+    const belowLatestLts = latestLts
+      ? !isRuntimeAtLeast(process.version, latestLts)
+      : false
+    const aboveOrEqualLatestLts = latestLts
+      ? isRuntimeAtLeast(process.version, latestLts)
+      : false
+
+    if (runningNonLts && aboveOrEqualLatestLts) {
+      logger(
+        'warn',
+        'Server',
+        `Non-LTS preview runtime detected (${process.version}), at or above latest LTS (${latestLts ?? 'unavailable'}). Accepted, but behavior may change between releases.`
+      )
+    } else if (runningNonLts) {
+      logger(
+        'warn',
+        'Server',
+        `Non-LTS runtime detected (${process.version}) between stable baseline (v${MINIMUM_NODE_VERSION}) and latest LTS (${latestLts ?? 'unavailable'}). Accepted, but stability is lower than LTS.`
+      )
+    } else if (belowLatestLts) {
+      logger(
+        'info',
+        'Server',
+        `Runtime ${process.version} is supported (>= v${MINIMUM_NODE_VERSION}) but below latest LTS (${latestLts ?? 'unavailable'}). If issues appear, consider updating to LTS.`
+      )
+    }
+
     memoryTrace('start:enter')
     this._validateConfig()
 

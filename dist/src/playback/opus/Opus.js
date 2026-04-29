@@ -93,7 +93,7 @@ export class Encoder extends Transform {
         this.readPos = 0;
     }
     _transform(chunk, _encoding, cb) {
-        if (!chunk || !chunk.length) {
+        if (!chunk?.length) {
             cb();
             return;
         }

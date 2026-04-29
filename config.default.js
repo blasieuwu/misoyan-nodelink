@@ -92,6 +92,22 @@ export default {
   enableLoadStreamEndpoint: false,
   resolveExternalLinks: false,
   fetchChannelInfo: false,
+  sponsorblock: {
+    enabled: false,
+    api: 'https://sponsor.ajay.app',
+    categories: [
+      'sponsor',
+      'selfpromo',
+      'interaction',
+      'intro',
+      'outro',
+      'preview',
+      'music_offtopic',
+      'filler'
+    ],
+    actionTypes: ['skip'],
+    skipMarginMs: 150
+  },
   filters: {
     enabled: {
       tremolo: true,
@@ -467,6 +483,9 @@ export default {
       instances: [], // (optional) list of API instances
       streamingInstances: [], // (optional) list of streaming instances
       quality: 'HI_RES_LOSSLESS' // HI_RES_LOSSLESS, LOSSLESS, HIGH, LOW
+    },
+    googledrive: {
+      enabled: true
     }
   },
   lyrics: {

@@ -77,9 +77,7 @@ export default class LyricsManager {
         }
     }
     async loadLyrics(decodedTrack, language, skipTrackSource = false) {
-        if (!decodedTrack ||
-            !decodedTrack.info?.sourceName ||
-            !decodedTrack.info?.uri) {
+        if (!decodedTrack?.info?.sourceName || !decodedTrack.info?.uri) {
             logger('warn', 'Lyrics', 'Invalid track object provided to loadLyrics', decodedTrack);
             return {
                 loadType: 'error',

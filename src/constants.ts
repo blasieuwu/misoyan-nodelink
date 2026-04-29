@@ -93,6 +93,8 @@ export const SEMVER_PATTERN =
  */
 export const PATH_VERSION = 'v4'
 
+export const MINIMUM_NODE_VERSION = '22.22.2'
+
 /**
  * HTTP status codes that indicate a redirect response
  *
@@ -187,6 +189,10 @@ export const GatewayEvents = {
   TRACK_STUCK: 'TrackStuckEvent',
   /** An exception occurred while playing track */
   TRACK_EXCEPTION: 'TrackExceptionEvent',
+  /** SponsorBlock segments were loaded */
+  SPONSORBLOCK_SEGMENTS_LOADED: 'SponsorBlockSegmentsLoadedEvent',
+  /** SponsorBlock segment was skipped */
+  SPONSORBLOCK_SEGMENT_SKIPPED: 'SponsorBlockSegmentSkippedEvent',
   /** Player position/state update */
   PLAYER_UPDATE: 'playerUpdate',
   /** Voice connection status changed */

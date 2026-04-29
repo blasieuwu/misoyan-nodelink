@@ -102,7 +102,7 @@ export default class SegmentFetcher {
      * @returns The map data as a Buffer, or null if no map is provided.
      */
     async fetchMap(mapInfo, keyInfo = null) {
-        if (!mapInfo || !mapInfo.uri)
+        if (!mapInfo?.uri)
             return null;
         const { body, error, statusCode } = await http1makeRequest(mapInfo.uri, {
             headers: this.headers,

@@ -178,7 +178,7 @@ function getPlayerPatchPayload(body) {
         typeof encodedTrack !== 'string') {
         return null;
     }
-    const position = payload.position;
+    const position = payload.position ?? payload.startTime;
     if (position !== undefined &&
         (typeof position !== 'number' || !Number.isFinite(position) || position < 0)) {
         return null;
@@ -231,6 +231,10 @@ function getPlayerPatchPayload(body) {
                 ? null
                 : undefined,
         position,
+        startTime: typeof payload.startTime === 'number' &&
+            Number.isFinite(payload.startTime)
+            ? payload.startTime
+            : undefined,
         endTime: typeof endTime === 'number'
             ? endTime
             : endTime === null

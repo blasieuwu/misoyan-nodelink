@@ -899,7 +899,7 @@ export default class EternalboxSource implements SourceInstance {
 
     mp4boxFile.onReady = (info: MP4Box.Movie) => {
       const audioTrack = info.tracks.find((t) => t.codec?.startsWith('mp4a'))
-      if (!audioTrack || !audioTrack.timescale || !audioTrack.audio) return
+      if (!audioTrack?.timescale || !audioTrack.audio) return
       timescale = audioTrack.timescale
       audioConfig = this._getAudioConfig(audioTrack)
       mp4boxFile.setExtractionOptions(audioTrack.id, null, { nbSamples: 1 })

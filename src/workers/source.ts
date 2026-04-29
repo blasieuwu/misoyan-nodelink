@@ -14,6 +14,10 @@ import {
   workerData as rawWorkerData,
   Worker
 } from 'node:worker_threads'
+
+import type PluginManager from '../managers/pluginManager.ts'
+import type { PluginManagerContext } from '../managers/pluginManager.ts'
+
 import type { NodeLink } from '../typings/playback/player.types.ts'
 import type {
   FrameType,
@@ -104,6 +108,7 @@ if (isMainThread) {
   }
 
   const config = await loadConfig()
+  utils.applyEnvOverrides(config)
   const specConfig: SourceWorkerConfig =
     // biome-ignore lint/complexity/useLiteralKeys: TypeScript requires index signature access
     (config['cluster'] as Record<string, SourceWorkerConfig> | undefined)?.[
@@ -113,10 +118,20 @@ if (isMainThread) {
 
   utils.initLogger(config)
 
-  const nodelink: Pick<WorkerNodeLink, 'options' | 'logger'> = {
-    options: config,
-    logger: utils.logger
-  }
+  const nodelink: Pick<WorkerNodeLink, 'options' | 'logger' | 'pluginManager'> =
+    {
+      options: config,
+      logger: utils.logger,
+      pluginManager: null as unknown as PluginManager
+    }
+
+  const { default: PluginManagerClass } = await import(
+    '../managers/pluginManager.ts'
+  )
+  nodelink.pluginManager = new PluginManagerClass(
+    nodelink as unknown as PluginManagerContext
+  )
+  await nodelink.pluginManager.load('source-worker')
 
   const maxThreadCount = Math.max(
     1,
@@ -130,6 +145,7 @@ if (isMainThread) {
   const taskQueue = createHeadQueue<TaskData>()
   let lastScaleUpAt = 0
   let nextThreadId = initialThreadCount + 1
+  const inheritedExecArgv = process.execArgv || []
 
   nodelink.logger(
     'info',
@@ -143,7 +159,8 @@ if (isMainThread) {
         config,
         silentLogs: specConfig.silentLogs ?? false,
         threadId: threadNumber
-      } satisfies WorkerData
+      } satisfies WorkerData,
+      ...(inheritedExecArgv.length > 0 ? { execArgv: inheritedExecArgv } : {})
     }) as MicroWorker
 
     worker.ready = false
@@ -491,6 +508,8 @@ if (isMainThread) {
    * Handles incoming IPC messages from parent process
    */
   process.on('message', (msg: { type: string; payload?: TaskData }) => {
+    nodelink.pluginManager?.callHook('onIPCMessage', msg)
+
     if (msg.type !== 'sourceTask') return
     if (msg.payload) {
       enqueueHeadQueue(taskQueue, msg.payload)
@@ -555,8 +574,17 @@ if (isMainThread) {
 
   const nodelink: WorkerNodeLink = {
     options: config,
-    logger: utils.logger
+    logger: utils.logger,
+    pluginManager: null as unknown as PluginManager
   } as unknown as WorkerNodeLink
+
+  const { default: PluginManagerClass } = await import(
+    '../managers/pluginManager.ts'
+  )
+  nodelink.pluginManager = new PluginManagerClass(
+    nodelink as unknown as PluginManagerContext
+  )
+  await nodelink.pluginManager.load('micro-worker')
 
   /**
    * Dynamically imports and initializes all required managers
@@ -1172,7 +1200,7 @@ if (isMainThread) {
   ): Promise<void> => {
     const videoId = payload.videoId
     const yt = nodelink.sources?.getSource('youtube')
-    if (!yt || !yt.liveChat)
+    if (!yt?.liveChat)
       throw new Error('YouTube source or live chat not available in worker')
 
     activeChats.set(id, true)
@@ -1315,7 +1343,8 @@ if (isMainThread) {
       } else {
         const additionalData = {
           ...(urlResult.additionalData || {}),
-          startTime: payload?.position || 0
+          startTime: payload?.position || 0,
+          position: payload?.position || 0
         }
 
         fetched =
@@ -1358,6 +1387,8 @@ if (isMainThread) {
    * Handles incoming task messages from parent thread
    */
   ;(parentPort as MessagePort).on('message', async (taskData: TaskData) => {
+    nodelink.pluginManager?.callHook('onIPCMessage', taskData)
+
     const { id, task, payload, socketPath } = taskData
 
     if (task === 'loadStream') {

@@ -532,7 +532,7 @@ export interface MonochromeSourceConfig extends SourceConfigBase {
 
   /**
    * Preferred audio quality.
-   * @remarks 
+   * @remarks
    * - `HI_RES_LOSSLESS`: Highest available quality (FLAC Hi-Res).
    * - `LOSSLESS`: Standard CD quality (FLAC).
    * - `HIGH`: High quality compressed (AAC 320kbps).

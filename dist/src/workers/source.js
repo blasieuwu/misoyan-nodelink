@@ -67,6 +67,7 @@ if (isMainThread) {
         }
     }
     const config = await loadConfig();
+    utils.applyEnvOverrides(config);
     const specConfig = 
     // biome-ignore lint/complexity/useLiteralKeys: TypeScript requires index signature access
     config['cluster']?.[
@@ -75,8 +76,12 @@ if (isMainThread) {
     utils.initLogger(config);
     const nodelink = {
         options: config,
-        logger: utils.logger
+        logger: utils.logger,
+        pluginManager: null
     };
+    const { default: PluginManagerClass } = await import("../managers/pluginManager.js");
+    nodelink.pluginManager = new PluginManagerClass(nodelink);
+    await nodelink.pluginManager.load('source-worker');
     const maxThreadCount = Math.max(1, specConfig.microWorkers ?? Math.min(2, os.cpus().length));
     const initialThreadCount = 1;
     const TASKS_PER_WORKER = specConfig.tasksPerWorker ?? 32;
@@ -86,6 +91,7 @@ if (isMainThread) {
     const taskQueue = createHeadQueue();
     let lastScaleUpAt = 0;
     let nextThreadId = initialThreadCount + 1;
+    const inheritedExecArgv = process.execArgv || [];
     nodelink.logger('info', 'SourceWorker', `Starting ${initialThreadCount}/${maxThreadCount} micro-worker(s) for API tasks...`);
     const createMicroWorker = (threadNumber) => {
         const worker = new Worker(__filename, {
@@ -93,7 +99,8 @@ if (isMainThread) {
                 config,
                 silentLogs: specConfig.silentLogs ?? false,
                 threadId: threadNumber
-            }
+            },
+            ...(inheritedExecArgv.length > 0 ? { execArgv: inheritedExecArgv } : {})
         });
         worker.ready = false;
         worker.load = 0;
@@ -368,6 +375,7 @@ if (isMainThread) {
      * Handles incoming IPC messages from parent process
      */
     process.on('message', (msg) => {
+        nodelink.pluginManager?.callHook('onIPCMessage', msg);
         if (msg.type !== 'sourceTask')
             return;
         if (msg.payload) {
@@ -428,8 +436,12 @@ else {
     utils.initLogger(config);
     const nodelink = {
         options: config,
-        logger: utils.logger
+        logger: utils.logger,
+        pluginManager: null
     };
+    const { default: PluginManagerClass } = await import("../managers/pluginManager.js");
+    nodelink.pluginManager = new PluginManagerClass(nodelink);
+    await nodelink.pluginManager.load('micro-worker');
     /**
      * Dynamically imports and initializes all required managers
      * @internal
@@ -866,7 +878,7 @@ else {
     const handleLiveChat = async (id, socketPath, payload) => {
         const videoId = payload.videoId;
         const yt = nodelink.sources?.getSource('youtube');
-        if (!yt || !yt.liveChat)
+        if (!yt?.liveChat)
             throw new Error('YouTube source or live chat not available in worker');
         activeChats.set(id, true);
         try {
@@ -969,7 +981,8 @@ else {
             else {
                 const additionalData = {
                     ...(urlResult.additionalData || {}),
-                    startTime: payload?.position || 0
+                    startTime: payload?.position || 0,
+                    position: payload?.position || 0
                 };
                 fetched =
                     (await nodelink.sources?.getTrackStream(urlResult.newTrack?.info || trackInfo, urlResult.url, urlResult.protocol, additionalData)) || null;
@@ -991,6 +1004,7 @@ else {
         }
     };
     parentPort.on('message', async (taskData) => {
+        nodelink.pluginManager?.callHook('onIPCMessage', taskData);
         const { id, task, payload, socketPath } = taskData;
         if (task === 'loadStream') {
             try {

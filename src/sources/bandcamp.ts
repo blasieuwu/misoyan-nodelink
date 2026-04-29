@@ -409,11 +409,7 @@ export default class BandcampSource {
   public async resolve(url: string): Promise<SourceResult> {
     try {
       const tralbumData = await this.extractTralbumData(url)
-      if (
-        !tralbumData ||
-        !tralbumData.trackinfo ||
-        tralbumData.trackinfo.length === 0
-      ) {
+      if (!tralbumData?.trackinfo || tralbumData.trackinfo.length === 0) {
         logger(
           'warn',
           'Sources',
@@ -649,7 +645,7 @@ export default class BandcampSource {
     if (page === null) return null
 
     const match = page.match(TRALBUM_REGEX)
-    if (!match || !match[2]) return null
+    if (!match?.[2]) return null
 
     try {
       const decodedString = this.decodeHtmlEntities(match[2])
@@ -718,14 +714,7 @@ export default class BandcampSource {
     const subheadMatch = block.match(SEARCH_SUBHEAD_REGEX)
     const artworkMatch = block.match(SEARCH_ARTWORK_REGEX)
 
-    if (
-      !titleMatch ||
-      !titleMatch[1] ||
-      !subheadMatch ||
-      !subheadMatch[1] ||
-      !urlMatch ||
-      !urlMatch[1]
-    ) {
+    if (!titleMatch?.[1] || !subheadMatch?.[1] || !urlMatch?.[1]) {
       return null
     }
 

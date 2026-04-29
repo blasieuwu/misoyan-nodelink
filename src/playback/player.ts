@@ -25,11 +25,13 @@ import type {
   LyricsPayload,
   NodeLink,
   PlayerOptions,
+  PlayerSponsorBlockState,
   PlayerStateJSON,
   PlayerTrack,
   PlayerVoiceState,
   PlayPayload,
   Session,
+  SponsorBlockSegment,
   StreamInfo,
   TrackFormat,
   TrackInfoExtended
@@ -99,6 +101,7 @@ export class Player {
     channelId: null
   }
   public streamInfo: StreamInfo = null
+  public sponsorBlock: PlayerSponsorBlockState
   public profilerStreamStats: {
     downloadedBytes: number
     totalBytes: number | null
@@ -145,6 +148,9 @@ export class Player {
   private _isRestoring = false
   private _isSeeking = false
   private _isStopping = false
+  private _pausedAtPosition: number | undefined = undefined
+  public stuckRecoveryCount = 0
+  private static MAX_STUCK_RECOVERY_ATTEMPTS = 3
 
   constructor(options: PlayerOptions) {
     if (
@@ -163,6 +169,24 @@ export class Player {
     this.fading = this.nodelink.options?.audio?.fading
     this.loudnessNormalizer =
       this.nodelink.options?.audio?.loudnessNormalizer ?? false
+
+    this.sponsorBlock = {
+      enabled: this.nodelink.options.sponsorblock?.enabled ?? false,
+      categories: this.nodelink.options.sponsorblock?.categories ?? [
+        'sponsor',
+        'selfpromo',
+        'interaction',
+        'intro',
+        'outro',
+        'preview',
+        'music_offtopic',
+        'filler'
+      ],
+      actionTypes: this.nodelink.options.sponsorblock?.actionTypes ?? ['skip'],
+      segments: [],
+      lastSkippedUuid: null,
+      skipMarginMs: this.nodelink.options.sponsorblock?.skipMarginMs ?? 150
+    }
 
     logger(
       'debug',
@@ -537,8 +561,9 @@ export class Player {
 
       if (wasResuming && state.reason !== 'seamless_bridge') {
         this._fading('trackEndSchedule', {
-          startPosition: this._realPosition()
+          startPosition: this._pausedAtPosition ?? this._realPosition()
         })
+        this._pausedAtPosition = undefined
       } else if (!this._isRestoring) {
         this._lyricsBasePackets =
           this.connection?.statistics?.packetsExpected ?? 0
@@ -631,6 +656,13 @@ export class Player {
         }
       })
 
+      this.nodelink.pluginManager?.callHook(
+        'onTrackException',
+        this.guildId,
+        this.track,
+        { message: error.message, severity, cause }
+      )
+
       if (shouldStop) {
         this._emitTrackEnd(EndReasons.LOAD_FAILED)
         this.stop()
@@ -654,6 +686,7 @@ export class Player {
     this.holoTrack = null
     this.isPaused = false
     this.position = 0
+    this._pausedAtPosition = undefined
     this._lastStreamDataTime = 0
     this.currentLyrics = null
     this.lyricsLineIndex = -1
@@ -759,6 +792,12 @@ export class Player {
       playingQuality
     })
 
+    this.nodelink.pluginManager?.callHook(
+      'onTrackStart',
+      this.guildId,
+      trackToEmit
+    )
+
     if (trackToEmit?.info?.sourceName === 'eternalbox') {
       const info = trackToEmit.info
       const pluginInfo = (trackToEmit.pluginInfo ?? {}) as {
@@ -808,6 +847,13 @@ export class Player {
       reason: reason,
       ...extra
     })
+
+    this.nodelink.pluginManager?.callHook(
+      'onTrackEnd',
+      this.guildId,
+      trackToEmit,
+      reason
+    )
 
     if (this.audioMixer?.autoCleanup) {
       this.audioMixer.clearLayers('MAIN_ENDED')
@@ -915,15 +961,25 @@ export class Player {
       return { exception: { message: 'Stream processor not initialized' } }
     }
 
-    const additionalData: Record<string, unknown> & { startTime?: number } = {
+    const additionalData: Record<string, unknown> & {
+      startTime?: number
+      position?: number
+      positionCallback?: (positionMs: number) => void
+    } = {
       ...urlData.additionalData
     }
-    if (startTime !== undefined) additionalData.startTime = startTime
-
-    urlData.additionalData = {
-      ...urlData.additionalData,
-      positionCallback: () => this._realPosition()
+    if (startTime !== undefined) {
+      additionalData.startTime = startTime
+      // Keep both keys for source compatibility while seek handling is unified.
+      additionalData.position = startTime
     }
+    additionalData.guildId = this.guildId
+    additionalData.positionCallback = (positionMs: number) => {
+      if (!Number.isFinite(positionMs) || positionMs < 0) return
+      this.position = positionMs
+    }
+
+    urlData.additionalData = additionalData
 
     const track = urlData?.newTrack
       ? (urlData?.newTrack?.info as TrackInfoExtended)
@@ -1028,6 +1084,13 @@ export class Player {
 
     const position = this._realPosition()
 
+    if (this.sponsorBlock.enabled && this.track) {
+      // Periodic log to verify position and sb state
+      if (Math.abs(position - this._lastPosition) > 1000 || this._lastPosition === 0) {
+         logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Current position: ${Math.round(position)}ms, Segments: ${this.sponsorBlock.segments.length}, LastSkipped: ${this.sponsorBlock.lastSkippedUuid}`)
+      }
+    }
+
     const threshold = this.nodelink.options.trackStuckThresholdMs
     if (
       threshold > 0 &&
@@ -1059,6 +1122,14 @@ export class Player {
               thresholdMs: threshold,
               reason: 'Playback of MP4 track is stuck'
             })
+
+            this.nodelink.pluginManager?.callHook(
+              'onTrackStuck',
+              this.guildId,
+              this.track,
+              threshold,
+              'Playback of MP4 track is stuck'
+            )
             this.stop()
             return false
           }
@@ -1107,10 +1178,29 @@ export class Player {
             return false
           }
 
+          if (
+            this.stuckRecoveryCount >=
+            Player.MAX_STUCK_RECOVERY_ATTEMPTS
+          ) {
+            logger(
+              'error',
+              'Player',
+              `Player for guild ${this.guildId} exceeded max recovery attempts (${Player.MAX_STUCK_RECOVERY_ATTEMPTS}). Stopping track.`
+            )
+            this.emitEvent(GatewayEvents.TRACK_STUCK, {
+              guildId: this.guildId,
+              track: this.track,
+              thresholdMs: threshold,
+              reason: 'Max recovery attempts exceeded'
+            })
+            this.stop()
+            return false
+          }
+
           logger(
             'warn',
             'Player',
-            `Player for guild ${this.guildId} is stuck. Attempting to recover...`,
+            `Player for guild ${this.guildId} is stuck. Attempting to recover... (attempt ${this.stuckRecoveryCount + 1}/${Player.MAX_STUCK_RECOVERY_ATTEMPTS})`,
             {
               lastPosition: this._lastPosition,
               currentPosition: position,
@@ -1125,6 +1215,7 @@ export class Player {
             }
           )
           this._isRecovering = true
+          this.stuckRecoveryCount++
 
           this.seek(this._lastPosition, this.track.endTime, true)
             .then((success) => {
@@ -1172,12 +1263,59 @@ export class Player {
       }
     }
 
-    if (position !== this._lastPosition) {
-      this._lastStreamDataTime = Date.now()
-    }
+  if (position !== this._lastPosition) {
+    this._lastStreamDataTime = Date.now()
+    if (this.stuckRecoveryCount > 0) this.stuckRecoveryCount = 0
+  }
 
     this._lastPosition = position
     this._syncLyrics()
+
+    if (
+      this.sponsorBlock.enabled &&
+      !this.isPaused &&
+      this.track &&
+      !this._isResuming &&
+      !this._isRecovering &&
+      !this._isSeeking
+    ) {
+      const segment = this.sponsorBlock.segments.find(
+        (s: SponsorBlockSegment) =>
+          this.sponsorBlock.categories.includes(s.category) &&
+          this.sponsorBlock.actionTypes.includes(s.actionType) &&
+          position + this.sponsorBlock.skipMarginMs >= s.start &&
+          position < s.end &&
+          this.sponsorBlock.lastSkippedUuid !== s.uuid
+      )
+
+      if (segment) {
+        this.sponsorBlock.lastSkippedUuid = segment.uuid
+        const skippedMs = segment.end - position
+        logger(
+          'info',
+          'Player',
+          `[SponsorBlock][${this.guildId}] Skipping segment: uuid=${segment.uuid} category=${segment.category} start=${segment.start}ms end=${segment.end}ms (Skipped: ${skippedMs}ms) for video ${this.track.info.identifier}`
+        )
+        this.seek(segment.end)
+          .then((success) => {
+            if (success) {
+              logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Successfully jumped to ${segment.end}ms`)
+              this.emitEvent(GatewayEvents.SPONSORBLOCK_SEGMENT_SKIPPED, {
+                segment,
+                skippedMs
+              })
+            } else {
+              logger('warn', 'Player', `[SponsorBlock][${this.guildId}] Failed to jump to ${segment.end}ms for segment ${segment.uuid}`)
+            }
+          })
+          .catch((err) => {
+            logger('error', 'Player', `[SponsorBlock][${this.guildId}] Error while seeking to segment end:`, err)
+          })
+        return true
+      }
+    }
+
+    if (this._isSeeking) return true
 
     this.session.socket.send(
       JSON.stringify({
@@ -1290,6 +1428,50 @@ export class Player {
 
     this._lyricsBasePosition = startTime || 0
     this._lyricsBasePackets = this.connection?.statistics?.packetsExpected ?? 0
+
+    if (
+      this.track.info.sourceName === 'youtube' ||
+      this.track.info.sourceName === 'ytmusic'
+    ) {
+      this.sponsorBlock.segments = []
+      this.sponsorBlock.lastSkippedUuid = null
+
+      const videoId = this.track.info.identifier
+      const sbConfig = this.nodelink.options.sponsorblock
+
+      if (this.sponsorBlock.enabled) {
+        logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Initiating segment fetch for video ${videoId}`)
+        const { fetchSponsorBlockSegments } = await import('../utils.ts')
+        fetchSponsorBlockSegments(
+          videoId,
+          this.sponsorBlock.categories,
+          this.sponsorBlock.actionTypes,
+          sbConfig?.api
+        )
+          .then((segments) => {
+            if (this.destroying || !this.track || this.track.info.identifier !== videoId) {
+              logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Ignoring fetched segments for ${videoId} (track changed or player destroyed)`)
+              return
+            }
+            this.sponsorBlock.segments = segments
+            logger('info', 'Player', `[SponsorBlock][${this.guildId}] Applied ${segments.length} segments for video ${videoId}`)
+            if (segments.length > 0) {
+              this.emitEvent(GatewayEvents.SPONSORBLOCK_SEGMENTS_LOADED, {
+                segments
+              })
+
+              // Immediate check after load
+              this._sendUpdate()
+            }
+          })
+          .catch((err) => {
+            logger('error', 'Player', `[SponsorBlock][${this.guildId}] Error fetching segments for ${videoId}:`, err)
+          })
+      } else {
+        logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Auto-skip disabled, skipping segment fetch for ${videoId}`)
+      }
+    }
+
     return true
   }
 
@@ -1430,6 +1612,9 @@ export class Player {
     this._isSeeking = true
     try {
       const sourceName = this.track.info.sourceName
+      const resolvedSourceName =
+        (this.streamInfo?.newTrack as { info?: { sourceName?: string } } | null)
+          ?.info?.sourceName ?? sourceName
       const unsupportedSources = ['local', 'deezer']
 
       let seekPromise: Promise<boolean>
@@ -1475,7 +1660,8 @@ export class Player {
       const hasSourceLoader = source && typeof source.loadStream === 'function'
       const canNativeSeek =
         !!hasSourceLoader &&
-        (this.streamInfo?.protocol === 'sabr' || sourceName === 'deezer')
+        (this.streamInfo?.protocol === 'sabr' ||
+          (sourceName === 'deezer' && resolvedSourceName === 'deezer'))
 
       if (forceLegacy) {
         seekPromise = this._legacySeek(
@@ -1488,7 +1674,7 @@ export class Player {
           endTime !== undefined ? endTime : this.track.endTime
         )
       } else if (
-        !unsupportedSources.includes(sourceName) &&
+        !unsupportedSources.includes(resolvedSourceName) &&
         this.streamInfo?.url &&
         this.streamInfo.protocol !== 'hls' &&
         this.streamInfo.protocol !== 'dash'
@@ -2011,6 +2197,13 @@ export class Player {
     )
 
     if (shouldPause) {
+      this._pausedAtPosition = this._realPosition()
+
+      if (this._fadeTimers?.trackEnd) {
+        clearTimeout(this._fadeTimers.trackEnd)
+        this._fadeTimers.trackEnd = null
+      }
+
       if (this._fading('pause')) {
         this.isPaused = true
         this.emitEvent(GatewayEvents.PAUSE, { paused: true })
@@ -2524,7 +2717,7 @@ export class Player {
   /**
    * Unsubscribes from lyrics events.
    */
-  public async unsubscribeLyrics(): Promise<void> {
+  public unsubscribeLyrics(): Promise<void> {
     return new Promise((resolve) => {
       this.isLyricsSubscribed = false
       this.skipTrackSource = false
@@ -2536,6 +2729,50 @@ export class Player {
       }
       return resolve()
     })
+  }
+
+  /**
+   * Returns current SponsorBlock state for the player.
+   *
+   * @returns Current segments and configuration.
+   */
+  public getSponsorBlock(): PlayerSponsorBlockState {
+    return this.sponsorBlock
+  }
+
+  /**
+   * Updates SponsorBlock settings for the player.
+   *
+   * @param updates - Configuration updates.
+   */
+  public updateSponsorBlock(
+    updates: Partial<
+      Omit<PlayerSponsorBlockState, 'segments' | 'lastSkippedUuid'>
+    >
+  ): void {
+    if (updates.enabled !== undefined) this.sponsorBlock.enabled = updates.enabled
+    if (updates.categories !== undefined)
+      this.sponsorBlock.categories = updates.categories
+    if (updates.actionTypes !== undefined)
+      this.sponsorBlock.actionTypes = updates.actionTypes
+  }
+
+  /**
+   * Overrides SponsorBlock segments for the current track.
+   *
+   * @param segments - Array of segments to apply.
+   */
+  public setSponsorBlockSegments(segments: SponsorBlockSegment[]): void {
+    this.sponsorBlock.segments = segments
+    this.sponsorBlock.lastSkippedUuid = null
+  }
+
+  /**
+   * Clears SponsorBlock state for the player.
+   */
+  public clearSponsorBlock(): void {
+    this.sponsorBlock.segments = []
+    this.sponsorBlock.lastSkippedUuid = null
   }
 
   /**
@@ -2774,12 +3011,112 @@ export class Player {
       timers.trackEnd = null
     }
 
+    if (action === 'trackEndSchedule') {
+      if (!this.track?.info) return false
+      const total =
+        this.track.endTime && this.track.endTime > 0
+          ? this.track.endTime
+          : this.track.info.length || 0
+      if (!Number.isFinite(total) || total <= 0) return false
+
+      const startPosition = payload.startPosition || 0
+      const remaining = Math.max(0, total - startPosition)
+      const teSection = this.fading?.trackEnd as FadingSection | undefined
+      const hasFade =
+        teSection &&
+        Number.isFinite(teSection.duration) &&
+        teSection.duration > 0
+      const fadeDuration = hasFade ? Math.min(teSection.duration, remaining) : 0
+      const fadeType = hasFade ? teSection.type || 'volume' : 'volume'
+      const delay = Math.max(0, remaining - fadeDuration)
+      const scratchStyle = (hasFade ? teSection.curve : undefined) as
+        | import('../typings/playback/processing.types.ts').ScratchStyle
+        | undefined
+
+      if (fadeType === 'tape' || fadeType === 'scratch') {
+        this._snapshotPosition()
+      }
+
+      timers.trackEnd = setTimeout(() => {
+        const stream = this.connection?.audioStream as AudioResource | undefined
+        if (stream) {
+          if (hasFade && teSection) {
+            if (fadeType === 'volume' || fadeType === 'both') {
+              stream.fadeTo?.(0, fadeDuration, teSection.curve)
+            }
+            if (fadeType === 'tape' || fadeType === 'both') {
+              stream.tapeTo?.(fadeDuration, 'stop', teSection.curve)
+            }
+            const effectiveScratchStyle = [
+              'wash',
+              'backspin',
+              'baby',
+              'stop'
+            ].includes(scratchStyle ?? '')
+              ? (scratchStyle as import('../typings/playback/processing.types.ts').ScratchStyle)
+              : 'wash'
+            if (fadeType === 'scratch') {
+              stream.scratchTo?.(fadeDuration, effectiveScratchStyle)
+            }
+          }
+
+          if (fadeType !== 'volume' && hasFade) {
+            const safetyTimeout = fadeDuration * 2 + 1500
+            const trackId = this.track?.info.identifier
+            setTimeout(() => {
+              if (
+                this.track?.info.identifier === trackId &&
+                !this.isUpdatingTrack &&
+                !this._isStopping
+              ) {
+                logger(
+                  'debug',
+                  'Player',
+                  `Safety stop triggered for guild ${this.guildId} after long fade-out ramp.`
+                )
+                this.connection?.stop(EndReasons.FINISHED)
+              }
+            }, safetyTimeout).unref?.()
+          } else if (fadeDuration === 0) {
+            if (this.track && !this.isUpdatingTrack && !this._isStopping) {
+              logger(
+                'debug',
+                'Player',
+                `Scheduled track end for guild ${this.guildId} at ${this.track.info.length}ms`
+              )
+              this.connection?.stop(EndReasons.FINISHED)
+            }
+          } else {
+            const trackId = this.track?.info.identifier
+            setTimeout(() => {
+              if (
+                this.track?.info.identifier === trackId &&
+                !this.isUpdatingTrack &&
+                !this._isStopping
+              ) {
+                logger(
+                  'debug',
+                  'Player',
+                  `Track end after volume fade for guild ${this.guildId}`
+                )
+                this.connection?.stop(EndReasons.FINISHED)
+              }
+            }, fadeDuration + 100).unref?.()
+          }
+        }
+        if (timers.trackEnd) {
+          clearTimeout(timers.trackEnd)
+          timers.trackEnd = null
+        }
+      }, delay)
+      return true
+    }
+
     if (!this.fading || this.fading.enabled !== true) return false
 
     let section: FadingSection | undefined | null = null
     if (action === 'trackStart' || action === 'trackStartArm')
       section = this.fading.trackStart
-    else if (action === 'trackEndSchedule') section = this.fading.trackEnd
     else if (action === 'trackStop') section = this.fading.trackStop
     else if (action === 'seek' || action === 'seekPrepare')
       section = this.fading.seek
@@ -3027,64 +3364,6 @@ export class Player {
       }, 10)
 
       timers.stop = { interval: checkInterval }
-      return true
-    }
-
-    if (action === 'trackEndSchedule') {
-      if (!this.track?.info) return false
-      const total =
-        this.track.endTime && this.track.endTime > 0
-          ? this.track.endTime
-          : this.track.info.length || 0
-      if (!Number.isFinite(total) || total <= 0) return false
-
-      const startPosition = payload.startPosition || 0
-      const remaining = Math.max(0, total - startPosition)
-      const fadeDuration = Math.min(section.duration, remaining)
-      const delay = Math.max(0, remaining - fadeDuration)
-
-      timers.trackEnd = setTimeout(() => {
-        const stream = this.connection?.audioStream as AudioResource | undefined
-        if (stream) {
-          if (fadeType === 'volume' || fadeType === 'both') {
-            stream.fadeTo?.(0, fadeDuration, section.curve)
-          }
-          if (fadeType === 'tape' || fadeType === 'both') {
-            stream.tapeTo?.(fadeDuration, 'stop', section.curve)
-          }
-          if (fadeType === 'scratch') {
-            const style = ['wash', 'backspin', 'baby', 'stop'].includes(
-              scratchStyle
-            )
-              ? scratchStyle
-              : 'wash'
-            stream.scratchTo?.(fadeDuration, style)
-          }
-
-          if (fadeType !== 'volume') {
-            const safetyTimeout = fadeDuration * 2 + 1500
-            const trackId = this.track?.info.identifier
-            setTimeout(() => {
-              if (
-                this.track?.info.identifier === trackId &&
-                !this.isUpdatingTrack &&
-                !this._isStopping
-              ) {
-                logger(
-                  'debug',
-                  'Player',
-                  `Safety stop triggered for guild ${this.guildId} after long fade-out ramp.`
-                )
-                this.connection?.stop(EndReasons.FINISHED)
-              }
-            }, safetyTimeout).unref?.()
-          }
-        }
-        if (timers.trackEnd) {
-          clearTimeout(timers.trackEnd)
-          timers.trackEnd = null
-        }
-      }, delay)
       return true
     }
 

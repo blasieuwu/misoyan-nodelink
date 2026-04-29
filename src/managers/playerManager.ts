@@ -8,7 +8,9 @@ import type {
   PlayerStateJSON,
   PlayerTrack,
   PlayerVoiceState,
-  PlayPayload
+  PlayPayload,
+  PlayerSponsorBlockState,
+  SponsorBlockSegment
 } from '../typings/playback/player.types.ts'
 import { logger } from '../utils.ts'
 
@@ -75,6 +77,7 @@ interface PlayerManagerNodelinkContext extends PlaybackNodeLink {
     players: number
   }
   workerManager: WorkerManagerLike | null
+  pluginManager: import('./pluginManager.ts').default | null
   extensions?: PlaybackNodeLink['extensions'] & {
     playerInterceptors?: PlayerInterceptor[]
   }
@@ -422,6 +425,13 @@ export default class PlayerManager {
           throw new Error('Player map did not contain the created entry.')
         }
 
+        this.nodelink.pluginManager?.callHook(
+          'onPlayerCreate',
+          guildId,
+          this.sessionId,
+          createResult
+        )
+
         return player
       } catch (error) {
         if (!createSucceeded) {
@@ -465,6 +475,13 @@ export default class PlayerManager {
     this.players.set(playerKey, player)
     this.nodelink.statistics.players += 1
 
+    this.nodelink.pluginManager?.callHook(
+      'onPlayerCreate',
+      guildId,
+      this.sessionId,
+      { created: true }
+    )
+
     return player
   }
 
@@ -500,6 +517,13 @@ export default class PlayerManager {
 
       workerManager.unassignGuild(playerKey)
       this.players.delete(playerKey)
+
+      this.nodelink.pluginManager?.callHook(
+        'onPlayerDestroy',
+        guildId,
+        this.sessionId
+      )
+
       return
     }
 
@@ -509,6 +533,12 @@ export default class PlayerManager {
     this.nodelink.statistics.players = Math.max(
       0,
       this.nodelink.statistics.players - 1
+    )
+
+    this.nodelink.pluginManager?.callHook(
+      'onPlayerDestroy',
+      guildId,
+      this.sessionId
     )
   }
 
@@ -856,6 +886,73 @@ export default class PlayerManager {
 
     const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
     await player.unsubscribeLyrics()
+    return undefined
+  }
+
+  /**
+   * Returns current SponsorBlock state for a player.
+   */
+  getSponsorBlock(
+    guildId: string
+  ): PlayerSponsorBlockState | PlayerCommandResponse {
+    if (this.isCluster) {
+      return this.runClusterPlayerCommand(guildId, 'getSponsorBlock', []) as any
+    }
+
+    const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
+    return player.getSponsorBlock()
+  }
+
+  /**
+   * Updates SponsorBlock settings for a player.
+   */
+  async updateSponsorBlock(
+    guildId: string,
+    updates: Partial<
+      Omit<PlayerSponsorBlockState, 'segments' | 'lastSkippedUuid'>
+    >
+  ): Promise<PlayerCommandResponse | undefined> {
+    if (this.isCluster) {
+      return this.runClusterPlayerCommand(guildId, 'updateSponsorBlock', [
+        updates
+      ]) as any
+    }
+
+    const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
+    player.updateSponsorBlock(updates)
+    return undefined
+  }
+
+  /**
+   * Overrides SponsorBlock segments for a player.
+   */
+  async setSponsorBlockSegments(
+    guildId: string,
+    segments: SponsorBlockSegment[]
+  ): Promise<PlayerCommandResponse | undefined> {
+    if (this.isCluster) {
+      return this.runClusterPlayerCommand(guildId, 'setSponsorBlockSegments', [
+        segments
+      ]) as any
+    }
+
+    const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
+    player.setSponsorBlockSegments(segments)
+    return undefined
+  }
+
+  /**
+   * Clears SponsorBlock state for a player.
+   */
+  async clearSponsorBlock(
+    guildId: string
+  ): Promise<PlayerCommandResponse | undefined> {
+    if (this.isCluster) {
+      return this.runClusterPlayerCommand(guildId, 'clearSponsorBlock', []) as any
+    }
+
+    const player = this.getLocalPlayerOrThrow(this.getPlayerKey(guildId))
+    player.clearSponsorBlock()
     return undefined
   }
 }

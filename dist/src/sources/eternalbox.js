@@ -693,7 +693,7 @@ export default class EternalboxSource {
         let totalBytes = 0;
         mp4boxFile.onReady = (info) => {
             const audioTrack = info.tracks.find((t) => t.codec?.startsWith('mp4a'));
-            if (!audioTrack || !audioTrack.timescale || !audioTrack.audio)
+            if (!audioTrack?.timescale || !audioTrack.audio)
                 return;
             timescale = audioTrack.timescale;
             audioConfig = this._getAudioConfig(audioTrack);

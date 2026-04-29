@@ -25,7 +25,7 @@ import StatsManager from "../managers/statsManager.js";
 import TrackCacheManager from "../managers/trackCacheManager.js";
 import { getWebmOpusProfilerStats } from "../playback/demuxers/WebmOpus.js";
 import { bufferPool } from "../playback/structs/BufferPool.js";
-import { cleanupHttpAgents, initLogger, logger } from "../utils.js";
+import { applyEnvOverrides, cleanupHttpAgents, initLogger, logger } from "../utils.js";
 import { createVoiceRelay } from "../voice/voiceRelay.js";
 import { createHeadQueue, dequeueHeadQueue, enqueueHeadQueue, getHeadQueueLength } from "./headQueue.js";
 let playerClassPromise = null;
@@ -65,6 +65,7 @@ catch {
     config = (await import(__rewriteRelativeImportExtension(resolveRootConfigUrl('config.default.js'))))
         .default;
 }
+applyEnvOverrides(config);
 const HIBERNATION_ENABLED = config.cluster?.hibernation?.enabled !== false;
 const HIBERNATION_TIMEOUT = config.cluster?.hibernation?.timeoutMs || 20 * 60 * 1000;
 const logging = config.logging;
@@ -1244,6 +1245,18 @@ function startTimers(hibernating = false) {
             const nodelinkLoad = elapsedMs > 0 ? (cpuUsage.user + cpuUsage.system) / 1000 / elapsedMs : 0;
             const mem = process.memoryUsage();
             const workerIdEnv = NODE_UNIQUE_ID;
+            const eluP50 = hndl.percentile(50) / 1e6;
+            const eluP95 = hndl.percentile(95) / 1e6;
+            const eluP99 = hndl.percentile(99) / 1e6;
+            let totalStuckRecoveries = 0;
+            for (const player of players.values()) {
+                const count = player
+                    .stuckRecoveryCount;
+                if (typeof count === 'number') {
+                    totalStuckRecoveries += count;
+                    player.stuckRecoveryCount = 0;
+                }
+            }
             const stats = {
                 workerId: parseInt(workerIdEnv ?? '0', 10) + 1,
                 isHibernating,
@@ -1251,12 +1264,15 @@ function startTimers(hibernating = false) {
                 playingPlayers: localPlayingPlayers,
                 commandQueueLength: Array.from(guildQueues.values()).reduce((acc, curr) => acc + getHeadQueueLength(curr.queue), 0),
                 cpu: { nodelinkLoad },
-                eventLoopLag: hndl.mean / 1e6,
+                eventLoopLag: eluP50,
+                eventLoopLagP95: eluP95,
+                eventLoopLagP99: eluP99,
                 memory: {
                     used: mem.heapUsed,
                     allocated: mem.heapTotal
                 },
-                frameStats: localFrameStats
+                frameStats: localFrameStats,
+                stuckRecoveries: totalStuckRecoveries
             };
             if (eventSocket && !eventSocket.destroyed) {
                 sendEventFrame(4, stats);
@@ -1283,7 +1299,7 @@ async function initialize() {
     await nodelink.credentialManager.load();
     await nodelink.sources.loadFolder();
     await nodelink.statsManager.initialize();
-    await nodelink.pluginManager.load('worker');
+    await nodelink.pluginManager.load('voice-worker');
     lastActivityTime = Date.now();
     logger('info', 'Worker', `Worker process ${process.pid} started and initialized.`);
 }
@@ -1337,7 +1353,8 @@ async function startLoadStream(streamId, payload) {
     }
     const additionalData = {
         ...(urlResult.additionalData || {}),
-        startTime: payload?.position || 0
+        startTime: payload?.position || 0,
+        position: payload?.position || 0
     };
     const fetched = (await nodelink.sources.getTrackStream(urlResult.newTrack?.info || trackInfo, urlResult.url, urlResult.protocol, additionalData));
     if (fetched.exception) {
@@ -1748,6 +1765,7 @@ function enqueueCommand(type, requestId, payload) {
         setImmediate(() => processQueue(queueKey));
 }
 process.on('message', (msg) => {
+    nodelink.pluginManager?.callHook('onIPCMessage', msg);
     if (!msg || typeof msg !== 'object')
         return;
     const message = msg;

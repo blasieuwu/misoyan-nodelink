@@ -52,6 +52,7 @@ export class Player {
         channelId: null
     };
     streamInfo = null;
+    sponsorBlock;
     profilerStreamStats = {
         downloadedBytes: 0,
         totalBytes: null,
@@ -84,6 +85,9 @@ export class Player {
     _isRestoring = false;
     _isSeeking = false;
     _isStopping = false;
+    _pausedAtPosition = undefined;
+    stuckRecoveryCount = 0;
+    static MAX_STUCK_RECOVERY_ATTEMPTS = 3;
     constructor(options) {
         if (!options.nodelink ||
             !options.session?.socket ||
@@ -98,6 +102,23 @@ export class Player {
         this.fading = this.nodelink.options?.audio?.fading;
         this.loudnessNormalizer =
             this.nodelink.options?.audio?.loudnessNormalizer ?? false;
+        this.sponsorBlock = {
+            enabled: this.nodelink.options.sponsorblock?.enabled ?? false,
+            categories: this.nodelink.options.sponsorblock?.categories ?? [
+                'sponsor',
+                'selfpromo',
+                'interaction',
+                'intro',
+                'outro',
+                'preview',
+                'music_offtopic',
+                'filler'
+            ],
+            actionTypes: this.nodelink.options.sponsorblock?.actionTypes ?? ['skip'],
+            segments: [],
+            lastSkippedUuid: null,
+            skipMarginMs: this.nodelink.options.sponsorblock?.skipMarginMs ?? 150
+        };
         logger('debug', 'Player', `New player created for guild ${this.guildId} in session ${this.session.id}`);
         this.emitEvent = (type, payload = {}) => {
             this.nodelink.statsManager.incrementPlaybackEvent(type);
@@ -217,11 +238,18 @@ export class Player {
             this._onError(err);
         });
         this.connection.on('audioStream', (audioStream) => {
-            audioStream.on('data', () => {
+            const dataHandler = () => {
                 this._lastStreamDataTime = Date.now();
                 if (this.isLyricsSubscribed && !this.isPaused && this.track) {
                     this._syncLyrics();
                 }
+            };
+            audioStream.on('data', dataHandler);
+            audioStream.once('close', () => {
+                audioStream.off('data', dataHandler);
+            });
+            audioStream.once('end', () => {
+                audioStream.off('data', dataHandler);
             });
         });
         if (this.nodelink.voiceRelay?.attach) {
@@ -347,8 +375,9 @@ export class Player {
             this.isPaused = false;
             if (wasResuming && state.reason !== 'seamless_bridge') {
                 this._fading('trackEndSchedule', {
-                    startPosition: this._realPosition()
+                    startPosition: this._pausedAtPosition ?? this._realPosition()
                 });
+                this._pausedAtPosition = undefined;
             }
             else if (!this._isRestoring) {
                 this._lyricsBasePackets =
@@ -415,6 +444,7 @@ export class Player {
                     cause: cause
                 }
             });
+            this.nodelink.pluginManager?.callHook('onTrackException', this.guildId, this.track, { message: error.message, severity, cause });
             if (shouldStop) {
                 this._emitTrackEnd(EndReasons.LOAD_FAILED);
                 this.stop();
@@ -436,6 +466,7 @@ export class Player {
         this.holoTrack = null;
         this.isPaused = false;
         this.position = 0;
+        this._pausedAtPosition = undefined;
         this._lastStreamDataTime = 0;
         this.currentLyrics = null;
         this.lyricsLineIndex = -1;
@@ -465,6 +496,12 @@ export class Player {
         const audioStream = conn?.audioStream;
         if (!audioStream)
             return;
+        try {
+            audioStream._cleanupListeners?.();
+        }
+        catch {
+            // Ignore cleanup errors
+        }
         try {
             audioStream.destroy?.();
         }
@@ -507,6 +544,7 @@ export class Player {
             track: trackToEmit,
             playingQuality
         });
+        this.nodelink.pluginManager?.callHook('onTrackStart', this.guildId, trackToEmit);
         if (trackToEmit?.info?.sourceName === 'eternalbox') {
             const info = trackToEmit.info;
             const pluginInfo = (trackToEmit.pluginInfo ?? {});
@@ -543,6 +581,7 @@ export class Player {
             reason: reason,
             ...extra
         });
+        this.nodelink.pluginManager?.callHook('onTrackEnd', this.guildId, trackToEmit, reason);
         if (this.audioMixer?.autoCleanup) {
             this.audioMixer.clearLayers('MAIN_ENDED');
         }
@@ -621,12 +660,18 @@ export class Player {
         const additionalData = {
             ...urlData.additionalData
         };
-        if (startTime !== undefined)
+        if (startTime !== undefined) {
             additionalData.startTime = startTime;
-        urlData.additionalData = {
-            ...urlData.additionalData,
-            positionCallback: () => this._realPosition()
+            // Keep both keys for source compatibility while seek handling is unified.
+            additionalData.position = startTime;
+        }
+        additionalData.guildId = this.guildId;
+        additionalData.positionCallback = (positionMs) => {
+            if (!Number.isFinite(positionMs) || positionMs < 0)
+                return;
+            this.position = positionMs;
         };
+        urlData.additionalData = additionalData;
         const track = urlData?.newTrack
             ? urlData?.newTrack?.info
             : info;
@@ -647,29 +692,41 @@ export class Player {
         if (typeof fetchedStream.on === 'function') {
             const eventStream = fetchedStream;
             const profilerTap = new PassThrough();
-            profilerTap.on('data', (chunk) => {
+            const profilerHandler = (chunk) => {
                 const size = typeof chunk === 'string'
                     ? Buffer.byteLength(chunk)
                     : Number(chunk?.length || 0);
                 if (size > 0)
                     this.profilerStreamStats.downloadedBytes += size;
                 this.profilerStreamStats.lastChunkAt = Date.now();
-            });
+            };
+            profilerTap.on('data', profilerHandler);
             streamForResource = fetchedStream.pipe(profilerTap);
             profilerTap._sourceStream =
                 fetchedStream;
-            eventStream.on?.('eternalboxJump', (data) => {
+            const eternalboxHandler = (data) => {
                 this.emitEvent(GatewayEvents.ETERNALBOX_JUMP, {
                     track: this.holoTrack || this.track,
                     eternalbox: data
                 });
-            });
-            eventStream.on?.('icyMetadata', (data) => {
+            };
+            const icyHandler = (data) => {
                 this.emitEvent(GatewayEvents.STREAM_METADATA, {
                     track: this.holoTrack || this.track,
                     stream: data
                 });
-            });
+            };
+            eventStream.on?.('eternalboxJump', eternalboxHandler);
+            eventStream.on?.('icyMetadata', icyHandler);
+            const cleanupListeners = () => {
+                eventStream.off?.('eternalboxJump', eternalboxHandler);
+                eventStream.off?.('icyMetadata', icyHandler);
+                profilerTap.off('data', profilerHandler);
+                profilerTap.destroy();
+            };
+            streamForResource.on('close', cleanupListeners);
+            streamForResource.on('error', cleanupListeners);
+            streamForResource._cleanupListeners = cleanupListeners;
         }
         const resource = audioResourceFactory(this.guildId, streamForResource, fetched.type || urlData.format, this.nodelink, this.filters, this.volumePercent / 100, this.audioMixer, false, this.loudnessNormalizer);
         return { stream: resource };
@@ -684,6 +741,12 @@ export class Player {
             this.destroying)
             return false;
         const position = this._realPosition();
+        if (this.sponsorBlock.enabled && this.track) {
+            // Periodic log to verify position and sb state
+            if (Math.abs(position - this._lastPosition) > 1000 || this._lastPosition === 0) {
+                logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Current position: ${Math.round(position)}ms, Segments: ${this.sponsorBlock.segments.length}, LastSkipped: ${this.sponsorBlock.lastSkippedUuid}`);
+            }
+        }
         const threshold = this.nodelink.options.trackStuckThresholdMs;
         if (threshold > 0 &&
             !this.isUpdatingTrack &&
@@ -706,6 +769,7 @@ export class Player {
                             thresholdMs: threshold,
                             reason: 'Playback of MP4 track is stuck'
                         });
+                        this.nodelink.pluginManager?.callHook('onTrackStuck', this.guildId, this.track, threshold, 'Playback of MP4 track is stuck');
                         this.stop();
                         return false;
                     }
@@ -739,7 +803,19 @@ export class Player {
                         this._resetTrack();
                         return false;
                     }
-                    logger('warn', 'Player', `Player for guild ${this.guildId} is stuck. Attempting to recover...`, {
+                    if (this.stuckRecoveryCount >=
+                        Player.MAX_STUCK_RECOVERY_ATTEMPTS) {
+                        logger('error', 'Player', `Player for guild ${this.guildId} exceeded max recovery attempts (${Player.MAX_STUCK_RECOVERY_ATTEMPTS}). Stopping track.`);
+                        this.emitEvent(GatewayEvents.TRACK_STUCK, {
+                            guildId: this.guildId,
+                            track: this.track,
+                            thresholdMs: threshold,
+                            reason: 'Max recovery attempts exceeded'
+                        });
+                        this.stop();
+                        return false;
+                    }
+                    logger('warn', 'Player', `Player for guild ${this.guildId} is stuck. Attempting to recover... (attempt ${this.stuckRecoveryCount + 1}/${Player.MAX_STUCK_RECOVERY_ATTEMPTS})`, {
                         lastPosition: this._lastPosition,
                         currentPosition: position,
                         stuckTime: stuckTime,
@@ -751,6 +827,7 @@ export class Player {
                         statistics: this.connection?.statistics
                     });
                     this._isRecovering = true;
+                    this.stuckRecoveryCount++;
                     this.seek(this._lastPosition, this.track.endTime, true)
                         .then((success) => {
                         if (success) {
@@ -788,9 +865,47 @@ export class Player {
         }
         if (position !== this._lastPosition) {
             this._lastStreamDataTime = Date.now();
+            if (this.stuckRecoveryCount > 0)
+                this.stuckRecoveryCount = 0;
         }
         this._lastPosition = position;
         this._syncLyrics();
+        if (this.sponsorBlock.enabled &&
+            !this.isPaused &&
+            this.track &&
+            !this._isResuming &&
+            !this._isRecovering &&
+            !this._isSeeking) {
+            const segment = this.sponsorBlock.segments.find((s) => this.sponsorBlock.categories.includes(s.category) &&
+                this.sponsorBlock.actionTypes.includes(s.actionType) &&
+                position + this.sponsorBlock.skipMarginMs >= s.start &&
+                position < s.end &&
+                this.sponsorBlock.lastSkippedUuid !== s.uuid);
+            if (segment) {
+                this.sponsorBlock.lastSkippedUuid = segment.uuid;
+                const skippedMs = segment.end - position;
+                logger('info', 'Player', `[SponsorBlock][${this.guildId}] Skipping segment: uuid=${segment.uuid} category=${segment.category} start=${segment.start}ms end=${segment.end}ms (Skipped: ${skippedMs}ms) for video ${this.track.info.identifier}`);
+                this.seek(segment.end)
+                    .then((success) => {
+                    if (success) {
+                        logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Successfully jumped to ${segment.end}ms`);
+                        this.emitEvent(GatewayEvents.SPONSORBLOCK_SEGMENT_SKIPPED, {
+                            segment,
+                            skippedMs
+                        });
+                    }
+                    else {
+                        logger('warn', 'Player', `[SponsorBlock][${this.guildId}] Failed to jump to ${segment.end}ms for segment ${segment.uuid}`);
+                    }
+                })
+                    .catch((err) => {
+                    logger('error', 'Player', `[SponsorBlock][${this.guildId}] Error while seeking to segment end:`, err);
+                });
+                return true;
+            }
+        }
+        if (this._isSeeking)
+            return true;
         this.session.socket.send(JSON.stringify({
             op: GatewayEvents.PLAYER_UPDATE,
             guildId: this.guildId,
@@ -863,6 +978,39 @@ export class Player {
         await this.waitEvent('playerStateChange', (s) => s.status === 'playing');
         this._lyricsBasePosition = startTime || 0;
         this._lyricsBasePackets = this.connection?.statistics?.packetsExpected ?? 0;
+        if (this.track.info.sourceName === 'youtube' ||
+            this.track.info.sourceName === 'ytmusic') {
+            this.sponsorBlock.segments = [];
+            this.sponsorBlock.lastSkippedUuid = null;
+            const videoId = this.track.info.identifier;
+            const sbConfig = this.nodelink.options.sponsorblock;
+            if (this.sponsorBlock.enabled) {
+                logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Initiating segment fetch for video ${videoId}`);
+                const { fetchSponsorBlockSegments } = await import("../utils.js");
+                fetchSponsorBlockSegments(videoId, this.sponsorBlock.categories, this.sponsorBlock.actionTypes, sbConfig?.api)
+                    .then((segments) => {
+                    if (this.destroying || !this.track || this.track.info.identifier !== videoId) {
+                        logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Ignoring fetched segments for ${videoId} (track changed or player destroyed)`);
+                        return;
+                    }
+                    this.sponsorBlock.segments = segments;
+                    logger('info', 'Player', `[SponsorBlock][${this.guildId}] Applied ${segments.length} segments for video ${videoId}`);
+                    if (segments.length > 0) {
+                        this.emitEvent(GatewayEvents.SPONSORBLOCK_SEGMENTS_LOADED, {
+                            segments
+                        });
+                        // Immediate check after load
+                        this._sendUpdate();
+                    }
+                })
+                    .catch((err) => {
+                    logger('error', 'Player', `[SponsorBlock][${this.guildId}] Error fetching segments for ${videoId}:`, err);
+                });
+            }
+            else {
+                logger('debug', 'Player', `[SponsorBlock][${this.guildId}] Auto-skip disabled, skipping segment fetch for ${videoId}`);
+            }
+        }
         return true;
     }
     /**
@@ -956,6 +1104,8 @@ export class Player {
         this._isSeeking = true;
         try {
             const sourceName = this.track.info.sourceName;
+            const resolvedSourceName = this.streamInfo?.newTrack
+                ?.info?.sourceName ?? sourceName;
             const unsupportedSources = ['local', 'deezer'];
             let seekPromise;
             if (!this.streamInfo?.url) {
@@ -983,14 +1133,15 @@ export class Player {
             const source = this.nodelink.sources.getSource(sourceName);
             const hasSourceLoader = source && typeof source.loadStream === 'function';
             const canNativeSeek = !!hasSourceLoader &&
-                (this.streamInfo?.protocol === 'sabr' || sourceName === 'deezer');
+                (this.streamInfo?.protocol === 'sabr' ||
+                    (sourceName === 'deezer' && resolvedSourceName === 'deezer'));
             if (forceLegacy) {
                 seekPromise = this._legacySeek(seekPosition, endTime !== undefined ? endTime : this.track.endTime);
             }
             else if (canNativeSeek) {
                 seekPromise = this._seekUsingSource(seekPosition, endTime !== undefined ? endTime : this.track.endTime);
             }
-            else if (!unsupportedSources.includes(sourceName) &&
+            else if (!unsupportedSources.includes(resolvedSourceName) &&
                 this.streamInfo?.url &&
                 this.streamInfo.protocol !== 'hls' &&
                 this.streamInfo.protocol !== 'dash') {
@@ -1335,6 +1486,11 @@ export class Player {
             return false;
         logger('debug', 'Player', `Setting pause to ${shouldPause} for guild ${this.guildId}`);
         if (shouldPause) {
+            this._pausedAtPosition = this._realPosition();
+            if (this._fadeTimers?.trackEnd) {
+                clearTimeout(this._fadeTimers.trackEnd);
+                this._fadeTimers.trackEnd = null;
+            }
             if (this._fading('pause')) {
                 this.isPaused = true;
                 this.emitEvent(GatewayEvents.PAUSE, { paused: true });
@@ -1725,7 +1881,7 @@ export class Player {
     /**
      * Unsubscribes from lyrics events.
      */
-    async unsubscribeLyrics() {
+    unsubscribeLyrics() {
         return new Promise((resolve) => {
             this.isLyricsSubscribed = false;
             this.skipTrackSource = false;
@@ -1737,6 +1893,43 @@ export class Player {
             }
             return resolve();
         });
+    }
+    /**
+     * Returns current SponsorBlock state for the player.
+     *
+     * @returns Current segments and configuration.
+     */
+    getSponsorBlock() {
+        return this.sponsorBlock;
+    }
+    /**
+     * Updates SponsorBlock settings for the player.
+     *
+     * @param updates - Configuration updates.
+     */
+    updateSponsorBlock(updates) {
+        if (updates.enabled !== undefined)
+            this.sponsorBlock.enabled = updates.enabled;
+        if (updates.categories !== undefined)
+            this.sponsorBlock.categories = updates.categories;
+        if (updates.actionTypes !== undefined)
+            this.sponsorBlock.actionTypes = updates.actionTypes;
+    }
+    /**
+     * Overrides SponsorBlock segments for the current track.
+     *
+     * @param segments - Array of segments to apply.
+     */
+    setSponsorBlockSegments(segments) {
+        this.sponsorBlock.segments = segments;
+        this.sponsorBlock.lastSkippedUuid = null;
+    }
+    /**
+     * Clears SponsorBlock state for the player.
+     */
+    clearSponsorBlock() {
+        this.sponsorBlock.segments = [];
+        this.sponsorBlock.lastSkippedUuid = null;
     }
     /**
      * Loads lyrics for the current track and emits events.
@@ -1944,13 +2137,91 @@ export class Player {
             clearTimeout(timers.trackEnd);
             timers.trackEnd = null;
         }
+        if (action === 'trackEndSchedule') {
+            if (!this.track?.info)
+                return false;
+            const total = this.track.endTime && this.track.endTime > 0
+                ? this.track.endTime
+                : this.track.info.length || 0;
+            if (!Number.isFinite(total) || total <= 0)
+                return false;
+            const startPosition = payload.startPosition || 0;
+            const remaining = Math.max(0, total - startPosition);
+            const teSection = this.fading?.trackEnd;
+            const hasFade = teSection &&
+                Number.isFinite(teSection.duration) &&
+                teSection.duration > 0;
+            const fadeDuration = hasFade ? Math.min(teSection.duration, remaining) : 0;
+            const fadeType = hasFade ? teSection.type || 'volume' : 'volume';
+            const delay = Math.max(0, remaining - fadeDuration);
+            const scratchStyle = (hasFade ? teSection.curve : undefined);
+            if (fadeType === 'tape' || fadeType === 'scratch') {
+                this._snapshotPosition();
+            }
+            timers.trackEnd = setTimeout(() => {
+                const stream = this.connection?.audioStream;
+                if (stream) {
+                    if (hasFade && teSection) {
+                        if (fadeType === 'volume' || fadeType === 'both') {
+                            stream.fadeTo?.(0, fadeDuration, teSection.curve);
+                        }
+                        if (fadeType === 'tape' || fadeType === 'both') {
+                            stream.tapeTo?.(fadeDuration, 'stop', teSection.curve);
+                        }
+                        const effectiveScratchStyle = [
+                            'wash',
+                            'backspin',
+                            'baby',
+                            'stop'
+                        ].includes(scratchStyle ?? '')
+                            ? scratchStyle
+                            : 'wash';
+                        if (fadeType === 'scratch') {
+                            stream.scratchTo?.(fadeDuration, effectiveScratchStyle);
+                        }
+                    }
+                    if (fadeType !== 'volume' && hasFade) {
+                        const safetyTimeout = fadeDuration * 2 + 1500;
+                        const trackId = this.track?.info.identifier;
+                        setTimeout(() => {
+                            if (this.track?.info.identifier === trackId &&
+                                !this.isUpdatingTrack &&
+                                !this._isStopping) {
+                                logger('debug', 'Player', `Safety stop triggered for guild ${this.guildId} after long fade-out ramp.`);
+                                this.connection?.stop(EndReasons.FINISHED);
+                            }
+                        }, safetyTimeout).unref?.();
+                    }
+                    else if (fadeDuration === 0) {
+                        if (this.track && !this.isUpdatingTrack && !this._isStopping) {
+                            logger('debug', 'Player', `Scheduled track end for guild ${this.guildId} at ${this.track.info.length}ms`);
+                            this.connection?.stop(EndReasons.FINISHED);
+                        }
+                    }
+                    else {
+                        const trackId = this.track?.info.identifier;
+                        setTimeout(() => {
+                            if (this.track?.info.identifier === trackId &&
+                                !this.isUpdatingTrack &&
+                                !this._isStopping) {
+                                logger('debug', 'Player', `Track end after volume fade for guild ${this.guildId}`);
+                                this.connection?.stop(EndReasons.FINISHED);
+                            }
+                        }, fadeDuration + 100).unref?.();
+                    }
+                }
+                if (timers.trackEnd) {
+                    clearTimeout(timers.trackEnd);
+                    timers.trackEnd = null;
+                }
+            }, delay);
+            return true;
+        }
         if (!this.fading || this.fading.enabled !== true)
             return false;
         let section = null;
         if (action === 'trackStart' || action === 'trackStartArm')
             section = this.fading.trackStart;
-        else if (action === 'trackEndSchedule')
-            section = this.fading.trackEnd;
         else if (action === 'trackStop')
             section = this.fading.trackStop;
         else if (action === 'seek' || action === 'seekPrepare')
@@ -2171,53 +2442,6 @@ export class Player {
                 }
             }, 10);
             timers.stop = { interval: checkInterval };
-            return true;
-        }
-        if (action === 'trackEndSchedule') {
-            if (!this.track?.info)
-                return false;
-            const total = this.track.endTime && this.track.endTime > 0
-                ? this.track.endTime
-                : this.track.info.length || 0;
-            if (!Number.isFinite(total) || total <= 0)
-                return false;
-            const startPosition = payload.startPosition || 0;
-            const remaining = Math.max(0, total - startPosition);
-            const fadeDuration = Math.min(section.duration, remaining);
-            const delay = Math.max(0, remaining - fadeDuration);
-            timers.trackEnd = setTimeout(() => {
-                const stream = this.connection?.audioStream;
-                if (stream) {
-                    if (fadeType === 'volume' || fadeType === 'both') {
-                        stream.fadeTo?.(0, fadeDuration, section.curve);
-                    }
-                    if (fadeType === 'tape' || fadeType === 'both') {
-                        stream.tapeTo?.(fadeDuration, 'stop', section.curve);
-                    }
-                    if (fadeType === 'scratch') {
-                        const style = ['wash', 'backspin', 'baby', 'stop'].includes(scratchStyle)
-                            ? scratchStyle
-                            : 'wash';
-                        stream.scratchTo?.(fadeDuration, style);
-                    }
-                    if (fadeType !== 'volume') {
-                        const safetyTimeout = fadeDuration * 2 + 1500;
-                        const trackId = this.track?.info.identifier;
-                        setTimeout(() => {
-                            if (this.track?.info.identifier === trackId &&
-                                !this.isUpdatingTrack &&
-                                !this._isStopping) {
-                                logger('debug', 'Player', `Safety stop triggered for guild ${this.guildId} after long fade-out ramp.`);
-                                this.connection?.stop(EndReasons.FINISHED);
-                            }
-                        }, safetyTimeout).unref?.();
-                    }
-                }
-                if (timers.trackEnd) {
-                    clearTimeout(timers.trackEnd);
-                    timers.trackEnd = null;
-                }
-            }, delay);
             return true;
         }
         return false;

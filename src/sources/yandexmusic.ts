@@ -475,27 +475,44 @@ export default class YandexMusicSource implements SourceInstance {
    */
   public async loadStream(
     _track: TrackInfo,
-    url: string
+    url: string,
+    _protocol?: string,
+    additionalData?: Record<string, unknown>
   ): Promise<TrackStreamResult> {
     const stream = new PassThrough()
+    const guildId = String(additionalData?.guildId || 'unbound')
+    const streamContext = `guildId=${guildId} trackId=${_track.identifier} title="${String(_track.title || '-').replace(/"/g, "'")}"`
     try {
-      const res = await http1makeRequest(url, {
-        method: 'GET',
-        streamOnly: true,
-        localAddress: this.nodelink.routePlanner?.getIP?.() || undefined,
-        proxy: this.config.proxy
-      })
+      const requestStream = async (
+        streamUrl: string,
+        startByte = 0
+      ): Promise<Awaited<ReturnType<typeof http1makeRequest>>> => {
+        const headers =
+          startByte > 0 ? { Range: `bytes=${startByte}-` } : undefined
+        return await http1makeRequest(streamUrl, {
+          method: 'GET',
+          streamOnly: true,
+          headers,
+          localAddress: this.nodelink.routePlanner?.getIP?.() || undefined,
+          proxy: this.config.proxy
+        })
+      }
+
+      let response = await requestStream(url)
 
       if (
-        res.error ||
-        (res.statusCode && res.statusCode !== 200 && res.statusCode !== 206)
+        response.error ||
+        (response.statusCode &&
+          response.statusCode !== 200 &&
+          response.statusCode !== 206)
       ) {
-        const message = res.error || `HTTP ${res.statusCode} on stream fetch.`
+        const message =
+          response.error || `HTTP ${response.statusCode} on stream fetch.`
         return { exception: { message, severity: 'fault' } }
       }
 
-      const sourceStream = res.stream as Readable
-      if (!sourceStream) {
+      const initialSourceStream = response.stream as Readable
+      if (!initialSourceStream) {
         return {
           exception: {
             message: 'No readable stream returned from CDN.',
@@ -504,30 +521,153 @@ export default class YandexMusicSource implements SourceInstance {
         }
       }
 
-      sourceStream.on('data', (chunk) => {
-        if (!stream.write(chunk)) sourceStream.pause()
-      })
+      let sourceStream: Readable | null = null
+      let currentUrl = response.finalUrl || url
+      let bytesRead = 0
+      let reconnecting = false
+      let ended = false
+      let consecutiveReconnectFailures = 0
+
+      const wait = async (ms: number): Promise<void> => {
+        await new Promise<void>((resolve) => {
+          const timeout = setTimeout(resolve, ms)
+          if (typeof timeout.unref === 'function') timeout.unref()
+        })
+      }
+
+      const finishStream = (): void => {
+        if (ended || stream.destroyed || stream.writableEnded) return
+        ended = true
+        stream.emit('finishBuffering')
+        stream.end()
+      }
+
+      const detachSource = (): void => {
+        if (!sourceStream) return
+        sourceStream.removeListener('data', onData)
+        sourceStream.removeListener('end', onEnd)
+        sourceStream.removeListener('error', onError)
+        sourceStream.removeListener('close', onClose)
+      }
+
+      const attachSource = (nextSource: Readable): void => {
+        detachSource()
+        sourceStream = nextSource
+        sourceStream.on('data', onData)
+        sourceStream.on('end', onEnd)
+        sourceStream.on('error', onError)
+        sourceStream.on('close', onClose)
+      }
+
+      const onData = (chunk: Buffer): void => {
+        bytesRead += chunk.length
+        if (consecutiveReconnectFailures > 0) consecutiveReconnectFailures = 0
+        if (!stream.write(chunk)) sourceStream?.pause()
+      }
+
+      const onEnd = (): void => {
+        finishStream()
+      }
+
+      const reconnect = async (reason: string): Promise<void> => {
+        if (ended || stream.destroyed || stream.writableEnded || reconnecting)
+          return
+        reconnecting = true
+
+        while (!ended && !stream.destroyed && !stream.writableEnded) {
+          consecutiveReconnectFailures++
+          const delay = Math.min(
+            300 * 2 ** Math.min(consecutiveReconnectFailures - 1, 5),
+            5000
+          )
+          logger(
+            'debug',
+            'YandexMusic',
+            `[${streamContext}] disconnected reason=${reason} retry=${consecutiveReconnectFailures} offset=${bytesRead} delayMs=${delay} url=${currentUrl}`
+          )
+          await wait(delay)
+          if (ended || stream.destroyed || stream.writableEnded) break
+
+          response = await requestStream(currentUrl, bytesRead)
+          if (response.statusCode === 416) {
+            finishStream()
+            break
+          }
+
+          const badStatus =
+            response.statusCode &&
+            response.statusCode !== 200 &&
+            response.statusCode !== 206
+
+          if (!response.error && !badStatus && response.stream) {
+            currentUrl = response.finalUrl || currentUrl
+            attachSource(response.stream as Readable)
+            reconnecting = false
+            return
+          }
+
+          const shouldRefreshUrl =
+            response.statusCode === 403 ||
+            response.statusCode === 404 ||
+            response.statusCode === 410
+          if (shouldRefreshUrl) {
+            const refreshed = await this.getTrackUrl(_track)
+            if (refreshed.url) {
+              currentUrl = refreshed.url
+            }
+          }
+        }
+
+        reconnecting = false
+      }
+
+      const onError = (err: Error): void => {
+        const netErr = err as NodeJS.ErrnoException
+        const message = err.message || String(err)
+        const isTransient =
+          netErr.code === 'ECONNRESET' ||
+          netErr.code === 'ECONNABORTED' ||
+          netErr.code === 'ETIMEDOUT' ||
+          /aborted|socket hang up|connection reset|timeout/i.test(message)
+
+        if (isTransient) {
+          void reconnect(message)
+          return
+        }
+
+        logger(
+          'error',
+          'YandexMusic',
+          `[${streamContext}] CDN stream error: ${message}`
+        )
+        if (!stream.destroyed) stream.destroy(err)
+      }
+
+      const onClose = (): void => {
+        if (!ended && !reconnecting) {
+          void reconnect('closed')
+        }
+      }
 
       stream.on('drain', () => {
-        if (!sourceStream.destroyed) sourceStream.resume()
+        if (sourceStream && !sourceStream.destroyed) sourceStream.resume()
       })
 
-      sourceStream.on('end', () => {
-        if (!stream.writableEnded) {
-          stream.emit('finishBuffering')
-          stream.end()
-        }
+      stream.on('close', () => {
+        detachSource()
+        sourceStream?.destroy?.()
       })
 
-      sourceStream.on('error', (err) => {
-        logger('error', 'YandexMusic', `CDN stream error: ${err.message}`)
-        if (!stream.destroyed) stream.destroy(err)
-      })
+      attachSource(initialSourceStream)
 
       return { stream, type: 'audio/mpeg' }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      logger('error', 'YandexMusic', `Stream loading failed: ${message}`)
+      logger(
+        'error',
+        'YandexMusic',
+        `[${streamContext}] stream loading failed: ${message}`
+      )
       if (!stream.destroyed)
         stream.destroy(e instanceof Error ? e : new Error(message))
       return { exception: { message, severity: 'fault' } }
@@ -613,7 +753,7 @@ export default class YandexMusicSource implements SourceInstance {
     }
 
     const album = data?.result
-    if (!album || !album.volumes?.length) {
+    if (!album?.volumes?.length) {
       const fallback = await this._resolveWithSongLink(
         `https://album.link/ya/${id}`,
         'album',

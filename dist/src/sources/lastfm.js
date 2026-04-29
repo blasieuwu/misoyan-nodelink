@@ -275,7 +275,7 @@ export default class LastFMSource {
                 ? searchTracks[searchTracks.findIndex((t) => t.info?.title === bestMatchCandidate.info.title &&
                     t.info?.author === bestMatchCandidate.info.author)]
                 : null;
-            if (!bestMatch || !bestMatch.info) {
+            if (!bestMatch?.info) {
                 return {
                     exception: {
                         message: 'No suitable alternative found after filtering.',
